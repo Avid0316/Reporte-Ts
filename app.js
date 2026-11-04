@@ -10,7 +10,7 @@
  *
  * Formato de los datos:
  *   meta:    { corteInventario: "AAAA-MM-DD", fuenteInventario, meses: { "AAAA-MM": { fuente, cargado } } }
- *   entries: [{ fecha: "dd/mm/aaaa", tipo, equipo, cantidad, origen, recibe, categoria }]
+ *   entries: [{ fecha: "dd/mm/aaaa", tipo, equipo, cantidad, origen, recibe, categoria, proveedor? }]
  *   stock:   [{ equipo, sucursal, cantidad, marca, categoria, condicion }]
  */
 (function () {
@@ -59,7 +59,7 @@
     tipo: { label: 'Tipo de ingreso', syn: ['nombreconceptoajuste', 'conceptoajuste', 'tipomovimiento', 'tipodeingreso', 'tipoingreso', 'tipo'] },
     equipo: { label: 'Equipo / producto', syn: ['nombreproducto', 'equipo', 'descripcion', 'descripcionproducto', 'articulo', 'producto'] },
     cantidad: { label: 'Cantidad', syn: ['cantidadvirtual', 'cantidad', 'unidades', 'cant', 'existencia', 'existencias', 'stock', 'disponible', 'saldo'] },
-    origen: { label: 'Sucursal de origen (cambios)', syn: ['sucursalorigen', 'origen', 'referencia'] },
+    origen: { label: 'Referencia (proveedor u origen del cambio)', syn: ['referencia', 'sucursalorigen', 'origen', 'proveedor'] },
     recibe: { label: 'Sucursal que recibe', syn: ['nombresucursal', 'sucursaldestino'] },
     // Inventario
     sucursal: { label: 'Sucursal', syn: ['nombresucursal', 'sucursal', 'tienda', 'bodega', 'almacen'] },
@@ -199,6 +199,9 @@
         if (tipo === 'CAMBIOS' || tipo === 'CAMBIO') {
           const o = canonBranch(cell(row, 'origen'));
           r.origen = o.known ? o.name : OTHER_ORIGIN;
+        } else if (/COMPRA/.test(tipo)) {
+          const prov = String(cell(row, 'origen') == null ? '' : cell(row, 'origen')).trim().replace(/\s+/g, ' ');
+          if (prov) r.proveedor = prov === prov.toUpperCase() ? titleCase(prov) : prov;
         }
         out.push(r);
       } else {
@@ -420,6 +423,7 @@
 
   let brandOf = {}; // nombre de producto -> marca (sale del inventario)
   const catLabel = r => category(r) === 'supplies' ? 'Insumos' : titleCase(r.categoria || categoryOf[r.equipo] || 'Sin categoría');
+  const provLabel = r => r.proveedor || 'Sin proveedor';
   const brandLabel = r => { const b = brandOf[r.equipo]; return b ? (b === 'IPHONE' ? 'Apple' : titleCase(b)) : 'Sin dato'; };
   const groupSum = (rows, key) => {
     const m = new Map();
@@ -454,6 +458,10 @@
     ].map(([k, v, l]) => '<button class="card" data-ptype="' + k + '"><strong>' + v + '</strong><span>' + l + '</span></button>').join('');
     $('purCatBars').innerHTML = barsHtml(groupSum(dev, catLabel), 'pcat');
     $('purBrandBars').innerHTML = barsHtml(groupSum(dev, brandLabel), 'pbrand');
+    const provs = groupSum(dev, provLabel).sort((a, b) => (a[0] === 'Sin proveedor') - (b[0] === 'Sin proveedor'));
+    $('purProvBars').innerHTML = barsHtml(provs.slice(0, 10), 'pprov');
+    $('purProvNote').textContent = 'Dispositivos comprados según la columna Referencia.' +
+      (provs.length > 10 ? ' Se muestran los 10 con más unidades de ' + provs.length + ' proveedores.' : '');
     const cats = {};
     dev.forEach(r => { cats[modelOf(r.equipo)] = catLabel(r); });
     $('purTop').innerHTML = groupSum(dev, r => modelOf(r.equipo)).slice(0, 10).map(([m, n]) =>
@@ -462,17 +470,19 @@
     fillPlain('purCat', [...new Set(all.map(catLabel))].sort(), 'Todas');
     fillPlain('purBrand', [...new Set(all.map(brandLabel))].sort(), 'Todas');
     fillPlain('purBranch', [...new Set(all.map(r => r.recibe).filter(Boolean))].sort(), 'Todas');
+    fillPlain('purProv', [...new Set(all.map(provLabel))].sort((a, b) => a.localeCompare(b)), 'Todos');
     renderPurchaseRows();
   }
 
   function renderPurchaseRows() {
-    const t = $('purType').value, c = $('purCat').value, b = $('purBrand').value, s = $('purBranch').value, q = $('purSearch').value.toLowerCase();
+    const t = $('purType').value, c = $('purCat').value, b = $('purBrand').value, s = $('purBranch').value, v = $('purProv').value, q = $('purSearch').value.toLowerCase();
     const rows = monthPurchases().filter(r => (t === 'all' || category(r) === t) && (c === 'all' || catLabel(r) === c) &&
-      (b === 'all' || brandLabel(r) === b) && (s === 'all' || r.recibe === s) && r.equipo.toLowerCase().includes(q));
+      (b === 'all' || brandLabel(r) === b) && (s === 'all' || r.recibe === s) && (v === 'all' || provLabel(r) === v) &&
+      (r.equipo.toLowerCase().includes(q) || provLabel(r).toLowerCase().includes(q)));
     $('purCount').textContent = rows.length + ' registros · ' + sum(rows) + ' unidades';
     $('purRows').innerHTML = rows.map(r => '<tr><td>' + esc(r.fecha) + '</td><td>' + esc(r.equipo) + '</td><td>' + esc(catLabel(r)) + '</td><td>' + esc(brandLabel(r)) +
-      '</td><td>' + esc(r.recibe) + '</td><td class="num">' + r.cantidad + '</td></tr>').join('') ||
-      '<tr><td colspan="6" class="empty">No hay resultados con estos filtros.</td></tr>';
+      '</td><td>' + esc(provLabel(r)) + '</td><td>' + esc(r.recibe) + '</td><td class="num">' + r.cantidad + '</td></tr>').join('') ||
+      '<tr><td colspan="7" class="empty">No hay resultados con estos filtros.</td></tr>';
   }
 
   /* ---------- Render: existencias ---------- */
@@ -773,10 +783,11 @@
   $('changeBranch').addEventListener('change', renderChangeRows);
 
   const purFilter = (vals) => { Object.keys(vals).forEach(id => { $(id).value = vals[id]; }); renderPurchaseRows(); $('purRows').closest('.panel').scrollIntoView({ behavior: 'smooth', block: 'start' }); };
-  $('purCards').addEventListener('click', e => { const b = e.target.closest('[data-ptype]'); if (b) purFilter({ purType: b.dataset.ptype, purCat: 'all', purBrand: 'all' }); });
-  $('purCatBars').addEventListener('click', e => { const b = e.target.closest('[data-pcat]'); if (b) purFilter({ purType: 'purchases', purCat: b.dataset.pcat, purBrand: 'all' }); });
-  $('purBrandBars').addEventListener('click', e => { const b = e.target.closest('[data-pbrand]'); if (b) purFilter({ purType: 'purchases', purCat: 'all', purBrand: b.dataset.pbrand }); });
-  ['purType', 'purCat', 'purBrand', 'purBranch', 'purSearch'].forEach(id => $(id).addEventListener('input', renderPurchaseRows));
+  $('purCards').addEventListener('click', e => { const b = e.target.closest('[data-ptype]'); if (b) purFilter({ purType: b.dataset.ptype, purCat: 'all', purBrand: 'all', purProv: 'all' }); });
+  $('purCatBars').addEventListener('click', e => { const b = e.target.closest('[data-pcat]'); if (b) purFilter({ purType: 'purchases', purCat: b.dataset.pcat, purBrand: 'all', purProv: 'all' }); });
+  $('purProvBars').addEventListener('click', e => { const b = e.target.closest('[data-pprov]'); if (b) purFilter({ purType: 'purchases', purCat: 'all', purBrand: 'all', purProv: b.dataset.pprov }); });
+  $('purBrandBars').addEventListener('click', e => { const b = e.target.closest('[data-pbrand]'); if (b) purFilter({ purType: 'purchases', purCat: 'all', purBrand: b.dataset.pbrand, purProv: 'all' }); });
+  ['purType', 'purCat', 'purBrand', 'purBranch', 'purProv', 'purSearch'].forEach(id => $(id).addEventListener('input', renderPurchaseRows));
 
   $('stockCards').addEventListener('click', e => {
     const b = e.target.closest('[data-level]'); if (!b) return;
