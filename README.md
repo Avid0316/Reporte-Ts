@@ -10,25 +10,31 @@ Informe de inventario de TechnologySales, publicado con GitHub Pages.
 | `informe-mensual.html` | Informe mensual de control operativo (septiembre 2026). |
 | `vendor/xlsx.full.min.js` | Lector de Excel ([SheetJS](https://sheetjs.com), licencia Apache 2.0). |
 
-## Actualizar el informe cada mes
+## Actualizar el informe
 
-1. Exporta del sistema los reportes **ENTRADAS** e **Inventario** tal como salen
-   (por ejemplo `ENTRADAS_SEP_Y_OCT.xlsx` e `Inventario_02.11.26.xlsx`).
-2. Abre la página, pulsa **Cargar Excel** y selecciona los dos archivos. La página
-   reconoce cuál es cada uno y sus columnas (si alguna no cuadra, se corrige en la lista).
-3. Elige el **mes del informe** y revisa la **fecha de corte** (se toma del nombre del
-   archivo de inventario).
-4. Pulsa **Descargar datos.js** y súbelo aquí (*Add file → Upload files*), reemplazando el
-   anterior. En 1–2 minutos todos ven el informe nuevo.
+Arriba de la página están los 12 meses del año; cada mes muestra cuántos equipos tiene
+cargados. El botón **Actualizar datos** abre el panel para cargar y guardar.
 
-Hasta el paso 4, los datos cargados solo se ven en tu navegador. `datos.js` no guarda
-IMEI, proveedores ni conceptos.
+1. **Entradas de un mes:** elige el mes y pulsa **Cargar Excel de entradas** con el reporte
+   ENTRADAS del sistema (con la columna *Cantidad*). Solo se toman las filas de ese mes y
+   reemplazan lo que hubiera guardado para él.
+2. **Inventario general:** pulsa **Cargar Excel de inventario**. Es uno solo para todo el
+   informe; la fecha de corte se toma del nombre del archivo (`Inventario_02.11.26.xlsx`).
+3. **Guardar cambios.** Hasta entonces, lo cargado solo se ve en tu navegador.
+   - Con la **conexión con GitHub** configurada (token *fine-grained* con permiso
+     *Contents: Read and write* solo en este repositorio), Guardar publica `datos.js` y en
+     1–2 minutos todos ven el informe nuevo.
+   - Sin conexión, Guardar descarga `datos.js` para subirlo aquí a mano
+     (*Add file → Upload files*).
+
+`datos.js` no guarda IMEI, proveedores ni conceptos.
 
 ### Cómo se leen los reportes
 
-- **ENTRADAS**: se usa la columna *Cantidad* (si no existe, cada fila cuenta como una unidad). El tipo sale de *NombreConceptoAjuste*; en los
-  `CAMBIOS`, la sucursal de origen sale de *Referencia*. Los accesorios se reconocen por la
-  categoría del producto en el inventario.
+- **ENTRADAS**: se usa la columna *Cantidad* (si no existe, cada fila cuenta como una
+  unidad y la página lo avisa). El tipo sale de *NombreConceptoAjuste*; en los `CAMBIOS`,
+  la sucursal de origen sale de *Referencia*. Los accesorios se reconocen por la categoría
+  del producto en el inventario; los productos con `HIDROGEL` son insumos.
 - **Inventario**: *NombreProducto*, *NombreSucursal*, *CantidadVirtual*; marca
   (*Referencia*), categoría (*NombreSubgrupoProducto*) y condición (*NombreGrupoProducto*).
 - Los nombres de sucursal escritos distinto se unifican en `app.js` (`BRANCHES` y
