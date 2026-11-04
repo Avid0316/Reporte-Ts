@@ -36,6 +36,9 @@
   const OTHER_ORIGIN = 'Otro origen';
 
   // Palabras que identifican un accesorio cuando no se conoce su categoría.
+  // Insumos: no cuentan como equipos ni como accesorios; se listan aparte en el resumen.
+  const SUPPLY_WORDS = ['HIDROGEL'];
+
   const ACCESSORY_WORDS = ['CABLE', 'CUBO', 'CARGADOR', 'ADAPTADOR', 'PENCIL', 'KEYBOARD', 'TECLADO',
     'FUNDA', 'CASE ', 'PROTECTOR', 'MICA', 'CORREA', 'MOUSE', 'AUDIFONO', 'POWER BANK'];
 
@@ -134,7 +137,8 @@
     const n = ' ' + r.equipo + ' ';
     return ACCESSORY_WORDS.some(w => n.includes(w));
   }
-  const category = r => /COMPRA/.test(r.tipo) ? (isAccessory(r) ? 'accessories' : 'purchases')
+  const isSupply = r => SUPPLY_WORDS.some(w => r.equipo.includes(w));
+  const category = r => isSupply(r) ? 'supplies' : /COMPRA/.test(r.tipo) ? (isAccessory(r) ? 'accessories' : 'purchases')
     : (r.tipo === 'CAMBIOS' || r.tipo === 'CAMBIO') ? 'changes' : 'others';
 
   /* ---------- Lectura de Excel ---------- */
@@ -277,7 +281,7 @@
     const metrics = [['purchases', 'Dispositivos comprados'], ['changes', 'Equipos en cambio'], ['others', 'Otros ingresos'], ['accessories', 'Accesorios comprados']];
     $('entryCards').innerHTML = metrics.map(([k, l]) =>
       '<button class="card" data-kind="' + k + '"><strong>' + sum(rows.filter(r => category(r) === k)) + '</strong><span>' + l + '</span></button>').join('');
-    const devices = sum(rows.filter(r => category(r) !== 'accessories')), accUnits = sum(rows.filter(r => category(r) === 'accessories'));
+    const devices = sum(rows.filter(r => !['accessories', 'supplies'].includes(category(r)))), accUnits = sum(rows.filter(r => category(r) === 'accessories'));
     $('entryTotal').textContent = devices + ' ' + plural(devices, 'equipo ingresado', 'equipos ingresados');
     $('entryAcc').textContent = accUnits ? ' + ' + accUnits + ' ' + plural(accUnits, 'accesorio', 'accesorios') : '';
 
@@ -295,9 +299,13 @@
     const acc = new Map();
     rows.filter(r => category(r) === 'accessories').forEach(r => acc.set(r.equipo, (acc.get(r.equipo) || 0) + r.cantidad));
     const accParts = [...acc].map(([name, n]) => n > 1 ? name + ' (' + n + ')' : name);
+    const sup = new Map();
+    rows.filter(r => category(r) === 'supplies').forEach(r => sup.set(r.equipo, (sup.get(r.equipo) || 0) + r.cantidad));
+    const supParts = [...sup].map(([name, n]) => name + ' (' + n + ')');
     let note = '';
     if (parts.length) note += 'Otros ingresos: ' + listJoin(parts) + '. ';
-    if (accParts.length) note += 'Accesorios comprados: ' + listJoin(accParts) + '.';
+    if (accParts.length) note += 'Accesorios comprados: ' + listJoin(accParts) + '. ';
+    if (supParts.length) note += 'Insumos (no se cuentan como equipos ni accesorios): ' + listJoin(supParts) + '.';
     $('sumNote').textContent = note;
     $('sumNote').hidden = !note;
     renderEntries();
