@@ -313,12 +313,9 @@
   function renderSummary() {
     const rows = monthEntries();
     const mName = monthName(month);
-    const brand = $('stockBrand').value;
-    $('subtitle').textContent = 'Entradas de ' + mName.split(' ')[0] + ' y seguimiento de existencias' +
-      (brand && brand !== 'all' ? ' de ' + (brand === 'IPHONE' ? 'iPhone' : titleCase(brand)) : '');
     const days = rows.map(r => +r.fecha.slice(0, 2)).filter(Boolean);
     $('sumEyebrow').textContent = 'ENTRADAS REGISTRADAS · ' + (days.length ? Math.min(...days) + '–' + Math.max(...days) + ' ' : '') + mName.toUpperCase();
-    document.title = 'TechnologySales — Informe de inventario · ' + mName;
+    document.title = 'Informe mensual DZ · ' + mName;
     $('sumTitle').textContent = 'Resumen de ' + mName.split(' ')[0];
 
     const empty = !rows.length;
