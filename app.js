@@ -12,6 +12,7 @@
  *   meta:    { corteInventario: "AAAA-MM-DD", fuenteInventario, meses: { "AAAA-MM": { fuente, cargado } } }
  *   entries: [{ fecha: "dd/mm/aaaa", tipo, equipo, cantidad, origen, recibe, categoria, proveedor? }]
  *   stock:   [{ equipo, sucursal, cantidad, marca, categoria, condicion }]
+ *   incidents: [{ id, fechaError, fechaDeteccion, tipo, sucursal, equipo, detalle, estado, fechaResolucion?, accion? }]
  */
 (function () {
   'use strict';
@@ -71,6 +72,10 @@
     entries: { label: 'Entradas', required: ['equipo', 'tipo'], optional: ['fecha', 'cantidad', 'origen', 'recibe'] },
     stock: { label: 'Inventario (existencias)', required: ['equipo', 'cantidad', 'sucursal'], optional: ['marca', 'categoria', 'condicion'] }
   };
+
+  // Control e incidencias (manual del Encargado de Sistema).
+  const INCIDENT_TYPES = ['Venta no facturada', 'Equipo físico sin registro', 'Diferencia sistema / físico', 'Equipo extraviado', 'Error de registro', 'Otro'];
+  const INCIDENT_BRANCHES = ['Novaprisa', 'Town Center', 'City Plaza', 'Agalta', 'Trinidad', 'Taller/Detalle', 'General'];
 
   const STORE_KEY = 'informe-inventario-datos-v2';
   const MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
@@ -483,6 +488,146 @@
       '<tr><td colspan="7" class="empty">No hay resultados con estos filtros.</td></tr>';
   }
 
+  /* ---------- Render: control e incidencias ---------- */
+
+  const incidents = () => DATA.incidents || [];
+  const dayDiff = (a, b) => Math.round((Date.parse(b) - Date.parse(a)) / 864e5);
+  const onTime = i => i.fechaError === i.fechaDeteccion;
+  const countBy = (rows, key) => {
+    const m = new Map();
+    rows.forEach(r => { const k = key(r) || 'Sin dato'; m.set(k, (m.get(k) || 0) + 1); });
+    return [...m].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  };
+  const countBars = (list, attr) => {
+    const max = Math.max(1, ...list.map(b => b[1]));
+    return list.map(([k, n]) => '<button class="barrow" data-' + attr + '="' + esc(k) + '" aria-label="' + esc(k) + ': ' + n + ' ' + plural(n, 'incidencia', 'incidencias') +
+      '. Ver detalle"><span>' + esc(k) + '</span><span class="track"><span class="fill" style="width:' + (n / max * 100) + '%"></span></span><b>' + n + '</b></button>').join('') ||
+      '<p class="empty">Sin incidencias.</p>';
+  };
+  const pct = (a, b) => b ? Math.round(a / b * 100) + ' %' : '—';
+  const monthIncidents = () => incidents().filter(i => i.fechaDeteccion.slice(0, 7) === month);
+  const delayText = i => onTime(i) ? '<span class="tag ok">Mismo día</span>' : '<span class="tag amber">' + dayDiff(i.fechaError, i.fechaDeteccion) + ' ' + plural(dayDiff(i.fechaError, i.fechaDeteccion), 'día', 'días') + ' después</span>';
+  const stateText = i => i.estado === 'resuelta' ? '<span class="tag ok">Resuelta</span>' : '<span class="tag red">Pendiente</span>';
+  function incidentRow(i, withMonth) {
+    return '<tr><td>' + fmtIso(i.fechaDeteccion) + '</td><td>' + esc(i.tipo) + '</td><td>' + esc(i.sucursal || '') + '</td><td>' + esc(i.equipo || '') +
+      '</td><td class="wrap">' + esc(i.detalle || '') + (i.estado === 'resuelta' && i.accion ? '<br><span class="note">Se hizo: ' + esc(i.accion) + '</span>' : '') +
+      '</td><td>' + delayText(i) + '</td><td>' + stateText(i) + (withMonth ? '' : '') +
+      '</td><td class="adminonly"><button class="mini" data-edit="' + esc(i.id) + '">Editar</button></td></tr>';
+  }
+
+  function renderControl() {
+    const mName = monthName(month), rows = monthIncidents();
+    $('ctlEyebrow').textContent = 'CONTROL E INCIDENCIAS · ' + mName.toUpperCase();
+    $('ctlTitle').textContent = 'Control de ' + mName.split(' ')[0];
+    const solved = rows.filter(i => i.estado === 'resuelta').length, ontime = rows.filter(onTime).length;
+    $('ctlCards').innerHTML = [
+      ['all', rows.length, 'Incidencias detectadas'],
+      ['resuelta', solved, 'Resueltas'],
+      ['pendiente', rows.length - solved, 'Pendientes'],
+      ['', pct(ontime, rows.length), 'Detectadas el mismo día']
+    ].map(([k, v, l]) => '<button class="card" data-istate="' + k + '"><strong>' + v + '</strong><span>' + l + '</span></button>').join('');
+    $('ctlNone').hidden = !!rows.length;
+    $('ctlNone').innerHTML = 'Sin incidencias registradas en ' + esc(mName) + '.';
+    $('ctlTypeBars').innerHTML = countBars(countBy(rows, i => i.tipo), 'itype');
+    $('ctlBranchBars').innerHTML = countBars(countBy(rows, i => i.sucursal), 'ibranch');
+
+    // Tendencia: los 6 meses hasta el elegido
+    const [y, m] = month.split('-').map(Number), keys = [];
+    for (let k = 5; k >= 0; k--) { const d = new Date(y, m - 1 - k, 1); keys.push(d.getFullYear() + '-' + pad(d.getMonth() + 1)); }
+    const per = keys.map(k => { const r = incidents().filter(i => i.fechaDeteccion.slice(0, 7) === k); return [k, r.length, r.filter(onTime).length]; });
+    const maxN = Math.max(1, ...per.map(p => p[1]));
+    $('ctlTrend').innerHTML = per.map(([k, n, ok]) => '<tr' + (k === month ? ' class="current"' : '') + '><td>' + cap(monthName(k)) + '</td><td><span class="track inline"><span class="fill" style="width:' + (n / maxN * 100) +
+      '%"></span></span> <b>' + n + '</b></td><td class="num">' + pct(ok, n) + '</td></tr>').join('');
+
+    const older = incidents().filter(i => i.estado !== 'resuelta' && i.fechaDeteccion.slice(0, 7) < month)
+      .sort((a, b) => a.fechaDeteccion < b.fechaDeteccion ? -1 : 1);
+    $('ctlOlderBox').hidden = !older.length;
+    $('ctlOlderTitle').textContent = older.length + ' ' + plural(older.length, 'pendiente de meses anteriores', 'pendientes de meses anteriores');
+    $('ctlOlder').innerHTML = older.map(i => incidentRow(i, true)).join('');
+
+    fillPlain('ctlType', [...new Set(rows.map(i => i.tipo))].sort(), 'Todos');
+    fillPlain('ctlBranch', [...new Set(rows.map(i => i.sucursal).filter(Boolean))].sort(), 'Todas');
+    renderControlRows();
+  }
+
+  function renderControlRows() {
+    const t = $('ctlType').value, s = $('ctlState').value, b = $('ctlBranch').value;
+    const rows = monthIncidents().filter(i => (t === 'all' || i.tipo === t) && (s === 'all' || (i.estado || 'pendiente') === s) && (b === 'all' || i.sucursal === b))
+      .sort((a, c) => a.fechaDeteccion < c.fechaDeteccion ? 1 : -1);
+    $('ctlCount').textContent = rows.length + ' ' + plural(rows.length, 'incidencia', 'incidencias');
+    $('ctlRows').innerHTML = rows.map(i => incidentRow(i)).join('') || '<tr><td colspan="8" class="empty">No hay incidencias con estos filtros.</td></tr>';
+  }
+
+  /* ---------- Formulario de incidencias ---------- */
+
+  let editingId = null;
+  function openIncident(id) {
+    const i = id ? incidents().find(x => x.id === id) : null;
+    editingId = i ? i.id : null;
+    const f = $('incForm');
+    $('incDlgTitle').textContent = i ? 'Editar incidencia' : 'Nueva incidencia';
+    f.fechaError.value = i ? i.fechaError : todayIso;
+    f.fechaDeteccion.value = i ? i.fechaDeteccion : todayIso;
+    f.tipo.value = i ? i.tipo : '';
+    f.sucursal.value = i ? (i.sucursal || '') : '';
+    f.equipo.value = i ? (i.equipo || '') : '';
+    f.detalle.value = i ? (i.detalle || '') : '';
+    f.estado.value = i ? (i.estado || 'pendiente') : 'pendiente';
+    f.fechaResolucion.value = i && i.fechaResolucion ? i.fechaResolucion : todayIso;
+    f.accion.value = i ? (i.accion || '') : '';
+    $('incDelete').hidden = !i;
+    $('incError').textContent = '';
+    toggleResolved();
+    $('incDialog').showModal();
+  }
+  function toggleResolved() { $('incResolved').hidden = $('incForm').estado.value !== 'resuelta'; }
+
+  function saveIncident(e) {
+    e.preventDefault();
+    const f = $('incForm');
+    const v = {
+      fechaError: f.fechaError.value, fechaDeteccion: f.fechaDeteccion.value, tipo: f.tipo.value, sucursal: f.sucursal.value,
+      equipo: up(f.equipo.value), detalle: f.detalle.value.trim(), estado: f.estado.value
+    };
+    let err = '';
+    if (!v.fechaError || !v.fechaDeteccion) err = 'Indica las dos fechas.';
+    else if (v.fechaError > v.fechaDeteccion) err = 'La fecha del error no puede ser posterior a la de detección.';
+    else if (!v.tipo) err = 'Elige el tipo de incidencia.';
+    else if (!v.detalle) err = 'Describe brevemente qué pasó.';
+    if (v.estado === 'resuelta') {
+      v.fechaResolucion = f.fechaResolucion.value || todayIso;
+      v.accion = f.accion.value.trim();
+      if (!err && v.fechaResolucion < v.fechaDeteccion) err = 'La fecha de resolución no puede ser anterior a la de detección.';
+    }
+    if (err) { $('incError').textContent = err; return; }
+    v.id = editingId || ('i' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6));
+    const list = incidents().filter(i => i.id !== v.id).concat([v]).sort((a, b) => a.fechaDeteccion < b.fechaDeteccion ? -1 : a.fechaDeteccion > b.fechaDeteccion ? 1 : 0);
+    $('incDialog').close();
+    if (v.fechaDeteccion.slice(0, 7) !== month) month = v.fechaDeteccion.slice(0, 7);
+    setDraft(Object.assign({}, DATA, { incidents: list }), ['incidencias']);
+  }
+
+  function deleteIncident() {
+    if (!editingId || !confirm('¿Eliminar esta incidencia?')) return;
+    const list = incidents().filter(i => i.id !== editingId);
+    $('incDialog').close();
+    setDraft(Object.assign({}, DATA, { incidents: list }), ['incidencias']);
+  }
+
+  // Excel con todas las incidencias (se guarda en el repositorio y se puede descargar).
+  function incidentsWorkbook() {
+    const d = iso => { const c = isoParts(iso); return c ? new Date(c.y, c.m - 1, c.d) : ''; };
+    const rows = [['ID', 'Fecha del error', 'Fecha de detección', 'Detectada el mismo día', 'Días de atraso', 'Tipo', 'Sucursal', 'Equipo', 'Qué pasó', 'Estado', 'Fecha de resolución', 'Qué se hizo']]
+      .concat(incidents().map(i => [i.id, d(i.fechaError), d(i.fechaDeteccion), onTime(i) ? 'Sí' : 'No', dayDiff(i.fechaError, i.fechaDeteccion), i.tipo, i.sucursal || '',
+        i.equipo || '', i.detalle || '', i.estado === 'resuelta' ? 'Resuelta' : 'Pendiente', i.estado === 'resuelta' ? d(i.fechaResolucion) : '', i.accion || '']));
+    const ws = XLSX.utils.aoa_to_sheet(rows, { cellDates: true, dateNF: 'dd/mm/yyyy' });
+    ws['!cols'] = [10, 14, 16, 12, 10, 26, 16, 32, 50, 12, 16, 40].map(w => ({ wch: w }));
+    ws['!autofilter'] = { ref: 'A1:L' + rows.length };
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Incidencias');
+    return wb;
+  }
+
   /* ---------- Render: existencias ---------- */
 
   let shown = [];
@@ -544,10 +689,11 @@
       '</span></td></tr>').join('') || '<tr><td colspan="3" class="empty">No hay resultados con estos filtros.</td></tr>';
   }
 
-  function renderMonthViews() { renderMonths(); renderAdmin(); renderSummary(); renderChanges(); renderPurchases(); }
+  function renderMonthViews() { renderMonths(); renderAdmin(); renderSummary(); renderChanges(); renderPurchases(); renderControl(); }
   function renderAll() {
     categoryOf = {}; brandOf = {};
     DATA.stock.forEach(r => { if (r.categoria) categoryOf[r.equipo] = r.categoria; if (r.marca) brandOf[r.equipo] = r.marca; });
+    $('equipoList').innerHTML = [...new Set(DATA.stock.map(r => r.equipo))].sort().map(n => '<option value="' + esc(n) + '">').join('');
     renderStockFrame(); renderMonthViews();
   }
 
@@ -697,14 +843,15 @@
       headers: Object.assign({ Authorization: 'Bearer ' + token, 'X-GitHub-Api-Version': '2022-11-28', Accept: 'application/vnd.github+json' }, (opts || {}).headers)
     }));
   }
-  async function ghPut(content, message) {
+  // Guarda un archivo del repositorio; content64 es su contenido en base64.
+  async function ghPut(path, content64, message) {
     const token = tokenGet(), r = ghRepo(), name = r.owner + '/' + r.repo;
-    const cur = await ghRequest('/contents/datos.js', token, { headers: { Accept: 'application/vnd.github.object' } });
+    const cur = await ghRequest('/contents/' + path, token, { headers: { Accept: 'application/vnd.github.object' } });
     if (!cur.ok && cur.status !== 404) throw new Error(ghError(cur.status, name));
     const sha = cur.ok ? (await cur.json()).sha : undefined;
-    const res = await ghRequest('/contents/datos.js', token, {
+    const res = await ghRequest('/contents/' + path, token, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, content: b64(content), sha })
+      body: JSON.stringify({ message, content: content64, sha })
     });
     if (!res.ok) throw new Error(ghError(res.status, name));
   }
@@ -721,10 +868,17 @@
     $('saveBtn').disabled = true;
     $('saveMsg').innerHTML = '<p class="note">Guardando en GitHub…</p>';
     try {
-      await ghPut(content, 'Actualizar datos del informe: ' + draft.changes.join(', '));
+      const message = 'Actualizar datos del informe: ' + draft.changes.join(', ');
+      const withIncidents = draft.changes.includes('incidencias');
+      await ghPut('datos.js', b64(content), message);
       PUBLISHED = DATA;
       draft = null; storageSet(null);
-      $('saveMsg').innerHTML = '<p><span class="tag ok">Guardado</span> La página pública se actualiza en 1–2 minutos.</p>';
+      let extra = '';
+      if (withIncidents) {
+        try { await ghPut('incidencias.xlsx', XLSX.write(incidentsWorkbook(), { type: 'base64', bookType: 'xlsx' }), 'Actualizar incidencias.xlsx'); extra = ' También se actualizó <b>incidencias.xlsx</b> en el repositorio.'; }
+        catch (x) { extra = ' <b>No se pudo actualizar incidencias.xlsx</b> (' + esc(x.message || 'error') + '); puedes descargarlo desde la pestaña Control.'; }
+      }
+      $('saveMsg').innerHTML = '<p><span class="tag ok">Guardado</span> La página pública se actualiza en 1–2 minutos.' + extra + '</p>';
       sheets = []; renderReview(); $('loadMsg').textContent = '';
       renderAll();
     } catch (e) {
@@ -763,10 +917,24 @@
     month = b.dataset.month; renderMonthViews();
   });
   $('year').addEventListener('change', () => { month = $('year').value + '-' + month.slice(5); renderMonthViews(); });
-  $('adminToggle').addEventListener('click', () => {
-    const open = $('dataPanel').hidden;
+  function setAdmin(open) {
     $('dataPanel').hidden = !open; $('adminToggle').setAttribute('aria-expanded', open);
-  });
+    document.body.classList.toggle('admin', open);
+  }
+  $('adminToggle').addEventListener('click', () => setAdmin($('dataPanel').hidden));
+
+  // Control e incidencias
+  ['ctlNew', 'panelNewIncident'].forEach(id => $(id).addEventListener('click', () => openIncident(null)));
+  document.addEventListener('click', e => { const b = e.target.closest('[data-edit]'); if (b) openIncident(b.dataset.edit); });
+  $('incForm').addEventListener('submit', saveIncident);
+  $('incForm').estado.addEventListener('change', toggleResolved);
+  $('incCancel').addEventListener('click', () => $('incDialog').close());
+  $('incDelete').addEventListener('click', deleteIncident);
+  ['ctlExcel', 'panelIncidentsExcel'].forEach(id => $(id).addEventListener('click', () => XLSX.writeFile(incidentsWorkbook(), 'incidencias.xlsx')));
+  ['ctlType', 'ctlState', 'ctlBranch'].forEach(id => $(id).addEventListener('input', renderControlRows));
+  $('ctlCards').addEventListener('click', e => { const b = e.target.closest('[data-istate]'); if (b && b.dataset.istate) { $('ctlState').value = b.dataset.istate; renderControlRows(); } });
+  $('ctlTypeBars').addEventListener('click', e => { const b = e.target.closest('[data-itype]'); if (b) { $('ctlType').value = b.dataset.itype; renderControlRows(); } });
+  $('ctlBranchBars').addEventListener('click', e => { const b = e.target.closest('[data-ibranch]'); if (b) { $('ctlBranch').value = b.dataset.ibranch; renderControlRows(); } });
 
   $('entryCards').addEventListener('click', e => {
     const b = e.target.closest('[data-kind]'); if (!b) return;
@@ -831,6 +999,8 @@
   $('ghSaveToken').addEventListener('click', connectToken);
   $('ghForget').addEventListener('click', () => { tokenSet(''); $('saveMsg').textContent = ''; renderAdmin(); });
 
-  if (draft) { $('dataPanel').hidden = false; $('adminToggle').setAttribute('aria-expanded', 'true'); }
+  $('incForm').tipo.innerHTML = '<option value="">Elige…</option>' + INCIDENT_TYPES.map(t => '<option>' + esc(t) + '</option>').join('');
+  $('incForm').sucursal.innerHTML = '<option value="">—</option>' + INCIDENT_BRANCHES.map(t => '<option>' + esc(t) + '</option>').join('');
+  if (draft) setAdmin(true);
   renderAll();
 })();
