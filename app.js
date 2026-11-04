@@ -12,6 +12,7 @@
  *   meta:    { corteInventario: "AAAA-MM-DD", fuenteInventario, meses: { "AAAA-MM": { fuente, cargado } } }
  *   entries: [{ fecha: "dd/mm/aaaa", tipo, equipo, cantidad, origen, recibe, categoria, proveedor? }]
  *   stock:   [{ equipo, sucursal, cantidad, marca, categoria, condicion }]
+ *   sales:   [{ fecha, sucursal, vendedor, factura, equipo, categoria, condicion, cantidad }]
  *   incidents: [{ id, fechaError, fechaDeteccion, tipo, sucursal, equipo, detalle, estado, fechaResolucion?, accion? }]
  */
 (function () {
@@ -66,12 +67,17 @@
     sucursal: { label: 'Sucursal', syn: ['nombresucursal', 'sucursal', 'tienda', 'bodega', 'almacen'] },
     marca: { label: 'Marca', syn: ['marca', 'referencia'] },
     categoria: { label: 'Categoría', syn: ['nombresubgrupoproducto', 'subgrupo', 'categoria'] },
-    condicion: { label: 'Condición', syn: ['nombregrupoproducto', 'condicion', 'estado', 'grupo'] }
+    condicion: { label: 'Condición', syn: ['nombregrupoproducto', 'condicion', 'estado', 'grupo'] },
+    // Ventas
+    vendedor: { label: 'Vendedor', syn: ['nombrevendedor', 'vendedor', 'cajero'] },
+    factura: { label: 'Factura', syn: ['referencia', 'factura', 'numerofactura', 'nofactura', 'documento'] }
   };
   const KINDS = {
     entries: { label: 'Entradas', required: ['equipo', 'tipo'], optional: ['fecha', 'cantidad', 'origen', 'recibe'] },
-    stock: { label: 'Inventario (existencias)', required: ['equipo', 'cantidad', 'sucursal'], optional: ['marca', 'categoria', 'condicion'] }
+    stock: { label: 'Inventario (existencias)', required: ['equipo', 'cantidad', 'sucursal'], optional: ['marca', 'categoria', 'condicion'] },
+    sales: { label: 'Ventas', required: ['equipo', 'cantidad', 'vendedor'], optional: ['fecha', 'sucursal', 'factura', 'categoria', 'condicion'] }
   };
+  const KIND_KEYS = ['entries', 'stock', 'sales'];
 
   // Control e incidencias (manual del Encargado de Sistema).
   const INCIDENT_TYPES = ['Venta no facturada', 'Equipo físico sin registro', 'Diferencia sistema / físico', 'Equipo extraviado', 'Error de registro', 'Otro'];
@@ -170,14 +176,16 @@
     let best = null;
     for (let r = 0; r < Math.min(25, rows.length); r++) {
       const headers = rows[r] || [];
-      const maps = { entries: detectColumns(headers, kindFields('entries')), stock: detectColumns(headers, kindFields('stock')) };
-      const score = Math.max(...['entries', 'stock'].map(k => Object.values(maps[k]).filter(v => v != null).length + (complete(k, maps[k]) ? 10 : 0)));
+      const maps = {};
+      KIND_KEYS.forEach(k => { maps[k] = detectColumns(headers, kindFields(k)); });
+      const score = Math.max(...KIND_KEYS.map(k => Object.values(maps[k]).filter(v => v != null).length + (complete(k, maps[k]) ? 10 : 0)));
       if (!best || score > best.score) best = { row: r, maps, score };
     }
     const label = norm(fileName + ' ' + sheetName);
     let kind = 'ignore';
     const okE = complete('entries', best.maps.entries), okS = complete('stock', best.maps.stock);
-    if (okS && (/inv|exist|stock|corte/.test(label) || !okE)) kind = 'stock';
+    if (complete('sales', best.maps.sales)) kind = 'sales'; // solo el reporte de ventas trae vendedor
+    else if (okS && (/inv|exist|stock|corte/.test(label) || !okE)) kind = 'stock';
     else if (okE) kind = 'entries';
     const headers = (rows[best.row] || []).map((h, i) => String(h).trim() || ('Columna ' + (i + 1)));
     return { fileName, sheetName, rows, headerRow: best.row, headers, maps: best.maps, kind };
@@ -209,6 +217,16 @@
           if (prov) r.proveedor = prov === prov.toUpperCase() ? titleCase(prov) : prov;
         }
         out.push(r);
+      } else if (s.kind === 'sales') {
+        const cantidad = toNumber(cell(row, 'cantidad'));
+        if (!cantidad) continue;
+        const vend = String(cell(row, 'vendedor') == null ? '' : cell(row, 'vendedor')).trim().replace(/\s+/g, ' ');
+        out.push({
+          fecha: toDate(cell(row, 'fecha')), sucursal: canonBranch(cell(row, 'sucursal')).name,
+          vendedor: vend === vend.toUpperCase() ? titleCase(vend) : vend,
+          factura: String(cell(row, 'factura') == null ? '' : cell(row, 'factura')).trim(),
+          equipo, categoria: up(cell(row, 'categoria')), condicion: up(cell(row, 'condicion')), cantidad
+        });
       } else {
         const cantidad = toNumber(cell(row, 'cantidad'));
         if (isNaN(cantidad)) continue;
@@ -302,6 +320,11 @@
       ? DATA.stock.length + ' filas' + (DATA.meta.fuenteInventario ? ' · ' + DATA.meta.fuenteInventario : '') + '. Cargar otro archivo lo reemplaza.'
       : 'Sin cargar todavía.';
     $('corte').value = DATA.meta.corteInventario || '';
+    const sRows = monthSales(), sInfo = (DATA.meta.ventas || {})[month];
+    $('upSalesMonth').textContent = monthName(month);
+    $('upSalesState').textContent = sRows.length
+      ? 'Guardado: ' + sRows.length + ' filas, ' + sum(sRows.filter(isDeviceSale)) + ' equipos vendidos' + (sInfo && sInfo.fuente ? ' (' + sInfo.fuente + (sInfo.cargado ? ', ' + fmtIso(sInfo.cargado) : '') + ')' : '') + '. Cargar otro archivo lo reemplaza.'
+      : 'Sin datos todavía.';
 
     const token = tokenGet(), repo = ghRepo();
     $('saveRow').hidden = !draft;
@@ -628,6 +651,97 @@
     return wb;
   }
 
+  /* ---------- Render: ventas ---------- */
+
+  const sales = () => DATA.sales || [];
+  const monthSales = () => sales().filter(r => monthKey(r.fecha) === month);
+  const isDeviceSale = r => !norm(r.categoria).startsWith('accesorio');
+  const saleBrand = r => { const b = brandOf[r.equipo]; return b ? (b === 'IPHONE' ? 'Apple' : titleCase(b)) : 'Sin dato'; };
+  const DIAS = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+  const weekday = f => { const m = String(f).match(/^(\d{2})\/(\d{2})\/(\d{4})$/); return m ? new Date(+m[3], +m[2] - 1, +m[1]).getDay() : -1; };
+  // Mes más reciente con ventas (para cruzar con el inventario)
+  const latestSalesMonth = () => { const l = [...new Set(sales().map(r => monthKey(r.fecha)).filter(Boolean))].sort(); return l[l.length - 1] || ''; };
+  // Días de venta del mes: si el mes ya terminó, todos sus días; si no, hasta la última venta.
+  function salesDays(key, rows) {
+    const [y, m] = key.split('-').map(Number), total = new Date(y, m, 0).getDate();
+    const last = Math.max(0, ...rows.map(r => +String(r.fecha).slice(0, 2) || 0));
+    return key < CURRENT ? total : Math.max(1, last);
+  }
+  const coverage = (stockQty, sold, days) => sold > 0 ? Math.max(0, stockQty) / (sold / days) : Infinity;
+  const covTag = d => d === Infinity ? '' : d <= 0 ? '<span class="tag red">Agotado</span>' : d < 7 ? '<span class="tag red">~' + Math.round(d) + ' días</span>' : d < 15 ? '<span class="tag amber">~' + Math.round(d) + ' días</span>' : '<span class="tag">~' + Math.round(d) + ' días</span>';
+
+  function renderSales() {
+    const mName = monthName(month), rows = monthSales();
+    $('salEyebrow').textContent = 'VENTAS · ' + mName.toUpperCase();
+    $('salTitle').textContent = 'Ventas de ' + mName.split(' ')[0];
+    const empty = !rows.length;
+    $('salEmpty').hidden = !empty; $('salBody').hidden = empty;
+    $('salEmpty').innerHTML = 'No hay ventas cargadas para ' + esc(mName) + '.<br><span class="note">Para agregarlas: <b>Actualizar datos → Cargar Excel de ventas</b>.</span>';
+    if (empty) return;
+
+    const dev = rows.filter(isDeviceSale), acc = rows.filter(r => !isDeviceSale(r));
+    const inv = {};
+    rows.forEach(r => { const k = r.factura || ('_' + r.fecha + r.vendedor); (inv[k] = inv[k] || []).push(r); });
+    const invs = Object.values(inv), devInvs = invs.filter(f => f.some(isDeviceSale));
+    const attach = devInvs.filter(f => f.some(r => !isDeviceSale(r))).length;
+    $('salCards').innerHTML = [
+      [sum(dev), 'Equipos vendidos'], [sum(acc), 'Accesorios vendidos'], [invs.length, 'Facturas'], [pct(attach, devInvs.length), 'Ventas de equipo con accesorio']
+    ].map(([v, l]) => '<div class="card"><strong>' + v + '</strong><span>' + l + '</span></div>').join('');
+
+    const top = groupSum(dev, r => modelOf(r.equipo)), cats = {};
+    dev.forEach(r => { cats[modelOf(r.equipo)] = titleCase(r.categoria || ''); });
+    $('salTop').innerHTML = top.slice(0, 10).map(([m, n], i) => '<tr><td>' + (i + 1) + '</td><td>' + esc(m) + '</td><td>' + esc(cats[m]) + '</td><td class="num"><b>' + n + '</b></td></tr>').join('');
+    $('salBranchBars').innerHTML = barsHtml(groupSum(dev, r => r.sucursal || 'Sin sucursal'), 'sbranch');
+    $('salBrandBars').innerHTML = barsHtml(groupSum(dev, saleBrand), 'sbrand');
+    $('salCondBars').innerHTML = barsHtml(groupSum(dev, r => titleCase(r.condicion || 'Sin dato')), 'scond');
+    const wd = [1, 2, 3, 4, 5, 6, 0].map(d => [DIAS[d], sum(dev.filter(r => weekday(r.fecha) === d))]);
+    const maxWd = Math.max(1, ...wd.map(w => w[1]));
+    $('salDays').innerHTML = wd.map(([d, n]) => '<div class="barrow static"><span>' + d + '</span><span class="track"><span class="fill" style="width:' + (n / maxWd * 100) + '%"></span></span><b>' + n + '</b></div>').join('');
+
+    // Ranking de vendedores
+    const vs = new Map();
+    rows.forEach(r => {
+      const v = vs.get(r.vendedor) || { dev: 0, acc: 0, inv: new Set(), br: new Map() };
+      if (isDeviceSale(r)) v.dev += r.cantidad; else v.acc += r.cantidad;
+      v.inv.add(r.factura); v.br.set(r.sucursal, (v.br.get(r.sucursal) || 0) + r.cantidad);
+      vs.set(r.vendedor, v);
+    });
+    const rank = [...vs].sort((a, b) => b[1].dev - a[1].dev || b[1].acc - a[1].acc);
+    $('salRank').innerHTML = rank.map(([name, v], i) => '<tr><td>' + (i + 1) + '</td><td>' + esc(name || 'Sin vendedor') + '</td><td>' + esc([...v.br].sort((a, b) => b[1] - a[1])[0][0] || '') +
+      '</td><td class="num"><b>' + v.dev + '</b></td><td class="num">' + v.acc + '</td><td class="num">' + v.inv.size + '</td></tr>').join('');
+
+    // Vendido vs. ingresado en el mes
+    const inDevices = sum(monthEntries().filter(isGoodsOnly)), soldDev = sum(dev), diff = inDevices - soldDev;
+    $('salVsIn').innerHTML = '<div class="vs"><div><strong>' + soldDev + '</strong><span>equipos vendidos</span></div><div><strong>' + inDevices + '</strong><span>equipos ingresados</span></div><div><strong>' +
+      (diff > 0 ? '+' : '') + diff + '</strong><span>diferencia</span></div></div>' +
+      '<p class="note">' + (monthEntries().length ? (diff < 0 ? 'Salió más de lo que entró: el inventario bajó en el mes.' : 'Entró al menos lo que se vendió.') : 'No hay entradas cargadas para este mes.') + '</p>';
+
+    // Riesgo de agotarse: lo vendido contra lo que queda
+    const days = salesDays(month, rows), left = {};
+    DATA.stock.forEach(r => { const k = modelOf(r.equipo); left[k] = (left[k] || 0) + r.cantidad; });
+    const risk = top.map(([m, n]) => ({ m, n, s: left[m], d: left[m] == null ? null : coverage(left[m], n, days) }))
+      .filter(x => x.d != null && x.d < 30).sort((a, b) => b.n - a.n || a.d - b.d); // primero lo que más se vende
+    $('salRiskNote').textContent = 'Los más vendidos que, al ritmo de venta de ' + mName.split(' ')[0] + ', alcanzan para menos de 30 días con el inventario' +
+      (DATA.meta.corteInventario ? ' del ' + fmtIso(DATA.meta.corteInventario) : '') + '.';
+    $('salRisk').innerHTML = risk.slice(0, 15).map(x => '<tr><td>' + esc(x.m) + '</td><td class="num">' + x.n + '</td><td class="num"><b>' + x.s + '</b></td><td>' + covTag(x.d) + '</td></tr>').join('') ||
+      '<tr><td colspan="4" class="empty">Ningún modelo vendido está por agotarse.</td></tr>';
+
+    fillPlain('salBranch', [...new Set(rows.map(r => r.sucursal).filter(Boolean))].sort(), 'Todas');
+    fillPlain('salSeller', [...new Set(rows.map(r => r.vendedor).filter(Boolean))].sort((a, b) => a.localeCompare(b)), 'Todos');
+    renderSalesRows();
+  }
+
+  function renderSalesRows() {
+    const t = $('salType').value, b = $('salBranch').value, v = $('salSeller').value, q = $('salSearch').value.toLowerCase();
+    const rows = monthSales().filter(r => (t === 'all' || (t === 'dev') === isDeviceSale(r)) && (b === 'all' || r.sucursal === b) && (v === 'all' || r.vendedor === v) &&
+      (r.equipo.toLowerCase().includes(q) || String(r.factura).toLowerCase().includes(q)));
+    $('salCount').textContent = rows.length + ' registros · ' + sum(rows) + ' unidades';
+    $('salRows').innerHTML = (rows.slice(0, 500).map(r => '<tr><td>' + esc(r.fecha) + '</td><td>' + esc(r.factura) + '</td><td>' + esc(r.equipo) + '</td><td>' + esc(titleCase(r.categoria || '')) +
+      '</td><td>' + esc(r.sucursal) + '</td><td>' + esc(r.vendedor) + '</td><td class="num">' + r.cantidad + '</td></tr>').join('') +
+      (rows.length > 500 ? '<tr><td colspan="7" class="empty">Se muestran 500 de ' + rows.length + '. Usa los filtros para acotar.</td></tr>' : '')) ||
+      '<tr><td colspan="7" class="empty">No hay resultados con estos filtros.</td></tr>';
+  }
+
   /* ---------- Render: existencias ---------- */
 
   let shown = [];
@@ -673,6 +787,16 @@
 
   function renderStock() {
     let all = aggregateStock($('stockBranch').value, $('groupBy').value === 'name');
+    const sk = latestSalesMonth(), byName = $('groupBy').value === 'name', br = $('stockBranch').value;
+    const sold = {};
+    let days = 1;
+    if (sk) {
+      sales().filter(r => monthKey(r.fecha) === sk && isDeviceSale(r) && (br === 'all' || r.sucursal === br))
+        .forEach(r => { const k = byName ? r.equipo : modelOf(r.equipo); sold[k] = (sold[k] || 0) + r.cantidad; });
+      days = salesDays(sk, sales().filter(r => monthKey(r.fecha) === sk));
+    }
+    document.querySelectorAll('.salescol').forEach(e => { e.hidden = !sk; });
+    if (sk) $('stockSoldTh').textContent = 'Vendidos en ' + monthName(sk).split(' ')[0];
     if ($('hideZero').checked) all = all.filter(r => r.quantity > 0);
     $('stockCards').innerHTML = [
       ['0', all.filter(r => r.quantity <= 0).length, 'Grupos agotados'],
@@ -686,10 +810,11 @@
     $('stockCount').textContent = shown.length + ' grupos mostrados de ' + all.length + ' · ' + shown.reduce((a, r) => a + r.quantity, 0) + ' unidades en el resultado';
     $('stockRows').innerHTML = shown.map(r => '<tr><td>' + esc(r.name) + '</td><td class="num"><b>' + r.quantity + '</b></td><td><span class="tag ' +
       (r.quantity <= 0 ? 'red' : r.quantity < 5 ? 'amber' : '') + '">' + (r.quantity <= 0 ? 'Agotado' : r.quantity < 5 ? '1 a 4' : r.quantity < 10 ? '5 a 9' : '10 o más') +
-      '</span></td></tr>').join('') || '<tr><td colspan="3" class="empty">No hay resultados con estos filtros.</td></tr>';
+      '</span></td>' + (sk ? '<td class="num">' + (sold[r.name] || 0) + '</td><td>' + (sold[r.name] ? covTag(coverage(r.quantity, sold[r.name], days)) : '') + '</td>' : '') +
+      '</tr>').join('') || '<tr><td colspan="5" class="empty">No hay resultados con estos filtros.</td></tr>';
   }
 
-  function renderMonthViews() { renderMonths(); renderAdmin(); renderSummary(); renderChanges(); renderPurchases(); renderControl(); }
+  function renderMonthViews() { renderMonths(); renderAdmin(); renderSummary(); renderChanges(); renderPurchases(); renderSales(); renderControl(); }
   function renderAll() {
     categoryOf = {}; brandOf = {};
     DATA.stock.forEach(r => { if (r.categoria) categoryOf[r.equipo] = r.categoria; if (r.marca) brandOf[r.equipo] = r.marca; });
@@ -718,7 +843,7 @@
         const fields = s.kind === 'ignore' ? [] : kindFields(s.kind);
         return '<details class="sheet"' + (issues.length || s.kind === 'ignore' ? ' open' : '') + '><summary><b>' + esc(s.fileName) + (s.sheetName ? ' · ' + esc(s.sheetName) : '') +
           '</b> ' + status + '</summary><div class="filters"><label>Usar como<select data-i="' + i + '" data-k="kind">' +
-          [['ignore', 'No usar'], ['entries', KINDS.entries.label], ['stock', KINDS.stock.label]].map(([v, l]) => '<option value="' + v + '"' + (s.kind === v ? ' selected' : '') + '>' + l + '</option>').join('') +
+          [['ignore', 'No usar'], ['entries', KINDS.entries.label], ['stock', KINDS.stock.label], ['sales', KINDS.sales.label]].map(([v, l]) => '<option value="' + v + '"' + (s.kind === v ? ' selected' : '') + '>' + l + '</option>').join('') +
           '</select></label>' +
           fields.map(f => '<label>' + FIELDS[f].label + (KINDS[s.kind].required.includes(f) ? ' *' : '') + '<select data-i="' + i + '" data-f="' + f + '"><option value="">— sin columna —</option>' +
             s.headers.map((h, j) => '<option value="' + j + '"' + (s.maps[s.kind][f] === j ? ' selected' : '') + '>' + esc(h) + '</option>').join('') + '</select></label>').join('') +
@@ -728,13 +853,13 @@
 
   function applySheets() {
     const usable = sheets.filter(s => s.kind !== 'ignore' && !sheetIssues(s).length);
-    const entrySheets = usable.filter(s => s.kind === 'entries'), stockSheets = usable.filter(s => s.kind === 'stock');
+    const entrySheets = usable.filter(s => s.kind === 'entries'), stockSheets = usable.filter(s => s.kind === 'stock'), salesSheets = usable.filter(s => s.kind === 'sales');
     if (!usable.length) {
       $('loadMsg').innerHTML = '<span class="tag red">No se reconoció el archivo.</span> Indica abajo qué columna corresponde a cada dato.';
       return;
     }
     const base = baseForUpload;
-    const data = { meta: Object.assign({}, base.meta), entries: base.entries, stock: base.stock };
+    const data = Object.assign({}, base, { meta: Object.assign({}, base.meta) }); // conserva ventas e incidencias
     delete data.meta.fuente; delete data.meta.mes; // campos de versiones anteriores
     const done = [], changes = [];
     let problem = '', warn = '';
@@ -767,6 +892,24 @@
           (rest.size ? '; se ignoraron ' + esc(restText) : ''));
         changes.push('entradas de ' + monthName(uploadMonth));
         if (entrySheets.some(noQty)) warn = NO_QTY_WARNING;
+      }
+    }
+
+    if (salesSheets.length) {
+      const all = [].concat(...salesSheets.map(parseSheet));
+      const inMonth = all.filter(r => monthKey(r.fecha) === uploadMonth);
+      const others = all.length - inMonth.length;
+      if (!inMonth.length) {
+        const ms = [...new Set(all.map(r => monthKey(r.fecha)).filter(Boolean))];
+        problem = '<span class="tag red">El archivo no tiene ventas de ' + esc(monthName(uploadMonth)) + '.</span> ' +
+          (ms.length ? 'Trae ventas de: ' + esc(ms.map(monthName).join(', ')) + '. Elige ese mes arriba y vuelve a cargarlo.' : '');
+      } else {
+        const prev = (base.sales || []).filter(r => monthKey(r.fecha) === uploadMonth).length;
+        data.sales = (base.sales || []).filter(r => monthKey(r.fecha) !== uploadMonth).concat(inMonth);
+        data.meta.ventas = Object.assign({}, base.meta.ventas, { [uploadMonth]: { fuente: [...new Set(salesSheets.map(s => s.fileName))].join(', '), cargado: todayIso } });
+        done.push('ventas de ' + monthName(uploadMonth) + ': ' + inMonth.length + ' filas' + (prev ? ' (reemplazan ' + prev + ' anteriores)' : '') +
+          (others ? '; se ignoraron ' + others + ' de otros meses' : ''));
+        changes.push('ventas de ' + monthName(uploadMonth));
       }
     }
 
@@ -923,7 +1066,12 @@
   }
   $('adminToggle').addEventListener('click', () => setAdmin($('dataPanel').hidden));
 
-  // Control e incidencias
+  // Ventas
+  $('salesInput').addEventListener('change', e => { if (e.target.files.length) loadFiles([...e.target.files], 'sales'); e.target.value = ''; });
+  ['salType', 'salBranch', 'salSeller', 'salSearch'].forEach(id => $(id).addEventListener('input', renderSalesRows));
+  $('salBranchBars').addEventListener('click', e => { const b = e.target.closest('[data-sbranch]'); if (b) { $('salBranch').value = b.dataset.sbranch; $('salType').value = 'dev'; renderSalesRows(); $('salRows').closest('.panel').scrollIntoView({ behavior: 'smooth', block: 'start' }); } });
+
+  // Control e incidencias: eventos
   ['ctlNew', 'panelNewIncident'].forEach(id => $(id).addEventListener('click', () => openIncident(null)));
   document.addEventListener('click', e => { const b = e.target.closest('[data-edit]'); if (b) openIncident(b.dataset.edit); });
   $('incForm').addEventListener('submit', saveIncident);

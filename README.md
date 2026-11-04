@@ -21,11 +21,17 @@ cargados. El botón **Actualizar datos** abre el panel para cargar y guardar.
    reemplazan lo que hubiera guardado para él.
 2. **Inventario general:** pulsa **Cargar Excel de inventario**. Es uno solo para todo el
    informe; la fecha de corte se toma del nombre del archivo (`Inventario_02.11.26.xlsx`).
-3. **Incidencias:** en la pestaña *Control e incidencias* (con el panel abierto) o en el
+3. **Ventas de un mes:** elige el mes y pulsa **Cargar Excel de ventas** con el reporte de
+   ventas del sistema (*NombreVendedor*, *NombreSucursal*, *Fecha*, *Referencia* = factura,
+   *NombreProducto*, *NombreSubgrupoProducto*, *NombreGrupoProducto*, *Unidades*). La
+   pestaña *Ventas* muestra modelos más vendidos, sucursales, marcas, nuevo/usado, días de
+   la semana, ranking de vendedores, vendido contra ingresado y qué se va a agotar según la
+   venta; *Existencias bajas* agrega lo vendido y para cuántos días alcanza.
+4. **Incidencias:** en la pestaña *Control e incidencias* (con el panel abierto) o en el
    panel, **+ Nueva incidencia** registra cada error del control diario: fecha del error,
    fecha de detección, tipo, sucursal, equipo, qué pasó y estado. El reporte calcula
    resueltas, pendientes, % detectadas el mismo día y la tendencia de 6 meses.
-4. **Guardar cambios.** Hasta entonces, lo cargado solo se ve en tu navegador.
+5. **Guardar cambios.** Hasta entonces, lo cargado solo se ve en tu navegador.
    - Con la **conexión con GitHub** configurada (token *fine-grained* con permiso
      *Contents: Read and write* solo en este repositorio), Guardar publica `datos.js` y en
      1–2 minutos todos ven el informe nuevo.
