@@ -277,7 +277,9 @@
     const metrics = [['purchases', 'Dispositivos comprados'], ['changes', 'Equipos en cambio'], ['others', 'Otros ingresos'], ['accessories', 'Accesorios comprados']];
     $('entryCards').innerHTML = metrics.map(([k, l]) =>
       '<button class="card" data-kind="' + k + '"><strong>' + sum(rows.filter(r => category(r) === k)) + '</strong><span>' + l + '</span></button>').join('');
-    $('entryTotal').textContent = sum(rows);
+    const devices = sum(rows.filter(r => category(r) !== 'accessories')), accUnits = sum(rows.filter(r => category(r) === 'accessories'));
+    $('entryTotal').textContent = devices + ' ' + plural(devices, 'equipo ingresado', 'equipos ingresados');
+    $('entryAcc').textContent = accUnits ? ' + ' + accUnits + ' ' + plural(accUnits, 'accesorio', 'accesorios') : '';
 
     const c = isoParts(DATA.meta.corteInventario);
     $('sumText').textContent = 'Las entradas registradas describen los movimientos ' + (mName ? 'de ' + mName.split(' ')[0] : 'del período') + '. ' +

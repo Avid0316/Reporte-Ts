@@ -26,7 +26,7 @@ IMEI, proveedores ni conceptos.
 
 ### Cómo se leen los reportes
 
-- **ENTRADAS**: cada fila es una unidad. El tipo sale de *NombreConceptoAjuste*; en los
+- **ENTRADAS**: se usa la columna *Cantidad* (si no existe, cada fila cuenta como una unidad). El tipo sale de *NombreConceptoAjuste*; en los
   `CAMBIOS`, la sucursal de origen sale de *Referencia*. Los accesorios se reconocen por la
   categoría del producto en el inventario.
 - **Inventario**: *NombreProducto*, *NombreSucursal*, *CantidadVirtual*; marca
