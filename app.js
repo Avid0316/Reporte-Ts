@@ -416,6 +416,65 @@
       '</td><td>' + esc(r.recibe) + '</td><td class="num">' + r.cantidad + '</td></tr>').join('') || '<tr><td colspan="5" class="empty">No hay cambios registrados.</td></tr>';
   }
 
+  /* ---------- Render: compras locales ---------- */
+
+  let brandOf = {}; // nombre de producto -> marca (sale del inventario)
+  const catLabel = r => category(r) === 'supplies' ? 'Insumos' : titleCase(r.categoria || categoryOf[r.equipo] || 'Sin categoría');
+  const brandLabel = r => { const b = brandOf[r.equipo]; return b ? (b === 'IPHONE' ? 'Apple' : titleCase(b)) : 'Sin dato'; };
+  const groupSum = (rows, key) => {
+    const m = new Map();
+    rows.forEach(r => { const k = key(r); m.set(k, (m.get(k) || 0) + r.cantidad); });
+    return [...m].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], undefined, { numeric: true }));
+  };
+  const barsHtml = (list, attr) => {
+    const max = Math.max(1, ...list.map(b => b[1]));
+    return list.map(([k, n]) => '<button class="barrow" data-' + attr + '="' + esc(k) + '" aria-label="' + esc(k) + ': ' + n + ' ' + plural(n, 'unidad', 'unidades') +
+      '. Ver detalle"><span>' + esc(k) + '</span><span class="track"><span class="fill" style="width:' + (n / max * 100) + '%"></span></span><b>' + n + '</b></button>').join('') ||
+      '<p class="empty">Sin compras de dispositivos.</p>';
+  };
+  const monthPurchases = () => monthEntries().filter(r => /COMPRA/.test(r.tipo));
+  function fillPlain(id, values, allLabel) {
+    const sel = $(id), cur = sel.value;
+    sel.innerHTML = '<option value="all">' + allLabel + '</option>' + values.map(v => '<option>' + esc(v) + '</option>').join('');
+    sel.value = values.includes(cur) ? cur : 'all';
+  }
+
+  function renderPurchases() {
+    $('purEyebrow').textContent = 'COMPRAS LOCALES · ' + monthName(month).toUpperCase();
+    const empty = !monthEntries().length;
+    $('purEmpty').hidden = !empty; $('purBody').hidden = empty;
+    $('purEmpty').innerHTML = 'No hay entradas cargadas para ' + esc(monthName(month)) + '.';
+    if (empty) return;
+    const all = monthPurchases(), dev = all.filter(r => category(r) === 'purchases');
+    $('purCards').innerHTML = [
+      ['purchases', sum(dev), 'Dispositivos comprados'],
+      ['accessories', sum(all.filter(r => category(r) === 'accessories')), 'Accesorios'],
+      ['supplies', sum(all.filter(r => category(r) === 'supplies')), 'Insumos'],
+      ['purchases', new Set(dev.map(r => modelOf(r.equipo))).size, 'Modelos distintos']
+    ].map(([k, v, l]) => '<button class="card" data-ptype="' + k + '"><strong>' + v + '</strong><span>' + l + '</span></button>').join('');
+    $('purCatBars').innerHTML = barsHtml(groupSum(dev, catLabel), 'pcat');
+    $('purBrandBars').innerHTML = barsHtml(groupSum(dev, brandLabel), 'pbrand');
+    const cats = {};
+    dev.forEach(r => { cats[modelOf(r.equipo)] = catLabel(r); });
+    $('purTop').innerHTML = groupSum(dev, r => modelOf(r.equipo)).slice(0, 10).map(([m, n]) =>
+      '<tr><td>' + esc(m) + '</td><td>' + esc(cats[m]) + '</td><td class="num"><b>' + n + '</b></td></tr>').join('') ||
+      '<tr><td colspan="3" class="empty">Sin compras de dispositivos.</td></tr>';
+    fillPlain('purCat', [...new Set(all.map(catLabel))].sort(), 'Todas');
+    fillPlain('purBrand', [...new Set(all.map(brandLabel))].sort(), 'Todas');
+    fillPlain('purBranch', [...new Set(all.map(r => r.recibe).filter(Boolean))].sort(), 'Todas');
+    renderPurchaseRows();
+  }
+
+  function renderPurchaseRows() {
+    const t = $('purType').value, c = $('purCat').value, b = $('purBrand').value, s = $('purBranch').value, q = $('purSearch').value.toLowerCase();
+    const rows = monthPurchases().filter(r => (t === 'all' || category(r) === t) && (c === 'all' || catLabel(r) === c) &&
+      (b === 'all' || brandLabel(r) === b) && (s === 'all' || r.recibe === s) && r.equipo.toLowerCase().includes(q));
+    $('purCount').textContent = rows.length + ' registros · ' + sum(rows) + ' unidades';
+    $('purRows').innerHTML = rows.map(r => '<tr><td>' + esc(r.fecha) + '</td><td>' + esc(r.equipo) + '</td><td>' + esc(catLabel(r)) + '</td><td>' + esc(brandLabel(r)) +
+      '</td><td>' + esc(r.recibe) + '</td><td class="num">' + r.cantidad + '</td></tr>').join('') ||
+      '<tr><td colspan="6" class="empty">No hay resultados con estos filtros.</td></tr>';
+  }
+
   /* ---------- Render: existencias ---------- */
 
   let shown = [];
@@ -477,10 +536,10 @@
       '</span></td></tr>').join('') || '<tr><td colspan="3" class="empty">No hay resultados con estos filtros.</td></tr>';
   }
 
-  function renderMonthViews() { renderMonths(); renderAdmin(); renderSummary(); renderChanges(); }
+  function renderMonthViews() { renderMonths(); renderAdmin(); renderSummary(); renderChanges(); renderPurchases(); }
   function renderAll() {
-    categoryOf = {};
-    DATA.stock.forEach(r => { if (r.categoria) categoryOf[r.equipo] = r.categoria; });
+    categoryOf = {}; brandOf = {};
+    DATA.stock.forEach(r => { if (r.categoria) categoryOf[r.equipo] = r.categoria; if (r.marca) brandOf[r.equipo] = r.marca; });
     renderStockFrame(); renderMonthViews();
   }
 
@@ -712,6 +771,12 @@
     $('changeBranch').value = b.dataset.branch; renderChangeRows();
   });
   $('changeBranch').addEventListener('change', renderChangeRows);
+
+  const purFilter = (vals) => { Object.keys(vals).forEach(id => { $(id).value = vals[id]; }); renderPurchaseRows(); $('purRows').closest('.panel').scrollIntoView({ behavior: 'smooth', block: 'start' }); };
+  $('purCards').addEventListener('click', e => { const b = e.target.closest('[data-ptype]'); if (b) purFilter({ purType: b.dataset.ptype, purCat: 'all', purBrand: 'all' }); });
+  $('purCatBars').addEventListener('click', e => { const b = e.target.closest('[data-pcat]'); if (b) purFilter({ purType: 'purchases', purCat: b.dataset.pcat, purBrand: 'all' }); });
+  $('purBrandBars').addEventListener('click', e => { const b = e.target.closest('[data-pbrand]'); if (b) purFilter({ purType: 'purchases', purCat: 'all', purBrand: b.dataset.pbrand }); });
+  ['purType', 'purCat', 'purBrand', 'purBranch', 'purSearch'].forEach(id => $(id).addEventListener('input', renderPurchaseRows));
 
   $('stockCards').addEventListener('click', e => {
     const b = e.target.closest('[data-level]'); if (!b) return;
