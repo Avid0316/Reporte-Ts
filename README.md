@@ -27,7 +27,7 @@ cargados. El botón **Actualizar datos** abre el panel para cargar y guardar.
    - Sin conexión, Guardar descarga `datos.js` para subirlo aquí a mano
      (*Add file → Upload files*).
 
-`datos.js` no guarda IMEI, proveedores ni conceptos.
+`datos.js` no guarda IMEI ni conceptos; en las compras guarda el proveedor (columna *Referencia*), que se ve en la pestaña Compras locales.
 
 ### Cómo se leen los reportes
 
