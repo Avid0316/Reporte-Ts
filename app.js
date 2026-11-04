@@ -2,27 +2,40 @@
  * Informe de inventario — lógica de la página.
  *
  * - Muestra los datos de datos.js (window.DATOS_INFORME).
- * - Permite cargar uno o varios Excel/CSV: detecta solo qué hoja son las
- *   entradas del mes y cuál el inventario, y qué columna es cada dato.
+ * - "Cargar Excel" lee los reportes del sistema (ENTRADAS e Inventario) u otros
+ *   Excel/CSV: detecta qué archivo es cada uno y qué columna es cada dato.
  * - Todas las cifras y los textos del informe se calculan de los datos.
  *
  * Formato de los datos:
- *   meta:    { fuente, corteInventario: "AAAA-MM-DD" }
- *   entries: [{ fecha: "dd/mm/aaaa", documento, tipo, equipo, cantidad, sucursal, accesorio, alias? }]
- *   stock:   [{ equipo, sucursal, cantidad }]
+ *   meta:    { fuente, corteInventario: "AAAA-MM-DD", mes: "AAAA-MM" }
+ *   entries: [{ fecha: "dd/mm/aaaa", tipo, equipo, cantidad, origen, recibe, categoria }]
+ *   stock:   [{ equipo, sucursal, cantidad, marca, categoria, condicion }]
  */
 (function () {
   'use strict';
 
   /* ---------- Configuración que se puede ajustar ---------- */
 
-  // Nombres de sucursal que deben contarse como otra sucursal.
-  const BRANCH_ALIASES = {
-    nathan: 'Novaprisa',
-    technologysales: 'Novaprisa'
+  // Sucursales conocidas (se comparan sin espacios, acentos ni mayúsculas).
+  const BRANCHES = {
+    towncenter: 'Town Center',
+    cityplaza: 'City Plaza',
+    novaprisa: 'Novaprisa',
+    agalta: 'Agalta',
+    trinidad: 'Trinidad',
+    tallerdetalle: 'Taller/Detalle'
   };
+  // Otros nombres que se cuentan como una sucursal o grupo.
+  const BRANCH_ALIASES = {
+    technologysales: 'Novaprisa',
+    nathan: 'Novaprisa',
+    cambiosdecelulares: 'Town / City / Agalta'
+  };
+  // Grupos que se muestran aparte (no compiten por "la sucursal con más cambios").
+  const GROUPED = ['Town / City / Agalta'];
+  const OTHER_ORIGIN = 'Otro origen';
 
-  // Palabras que identifican un accesorio cuando el Excel no trae columna "Accesorio".
+  // Palabras que identifican un accesorio cuando no se conoce su categoría.
   const ACCESSORY_WORDS = ['CABLE', 'CUBO', 'CARGADOR', 'ADAPTADOR', 'PENCIL', 'KEYBOARD', 'TECLADO',
     'FUNDA', 'CASE ', 'PROTECTOR', 'MICA', 'CORREA', 'MOUSE', 'AUDIFONO', 'POWER BANK'];
 
@@ -31,27 +44,30 @@
     'ENTRADA POR CAMBIO': ['entrada por cambio', 'entradas por cambio'],
     'INVENTARIO INICIAL': ['de inventario inicial', 'de inventario inicial'],
     'REINGRESO': ['reingreso', 'reingresos'],
-    'REINGRESOS': ['reingreso', 'reingresos'],
-    'RESAGADO': ['resagado', 'resagados'],
     'RESAGADOS': ['resagado', 'resagados']
   };
 
-  // Posibles nombres de columna (se comparan sin acentos, espacios ni mayúsculas).
+  // Posibles nombres de columna (se comparan sin acentos, espacios ni mayúsculas; el primero que aparezca gana).
   const FIELDS = {
-    fecha: { label: 'Fecha', syn: ['fecha', 'fechadocumento', 'fechamovimiento', 'fechaingreso', 'fechaentrada', 'date'] },
-    documento: { label: 'Documento', syn: ['documento', 'nodocumento', 'numdocumento', 'numerodocumento', 'nodoc', 'numdoc', 'doc', 'correlativo', 'numero', 'no'] },
-    tipo: { label: 'Tipo de ingreso', syn: ['tipo', 'tipomovimiento', 'tipodeingreso', 'tipoingreso', 'tipoentrada', 'concepto', 'movimiento', 'motivo', 'tipodocumento'] },
-    equipo: { label: 'Equipo / producto', syn: ['equipo', 'producto', 'nombreproducto', 'descripcion', 'descripcionproducto', 'articulo', 'nombre', 'item', 'modelo'] },
-    cantidad: { label: 'Cantidad / existencia', syn: ['cantidad', 'unidades', 'cant', 'qty', 'existencia', 'existencias', 'stock', 'disponible', 'saldo'] },
-    sucursal: { label: 'Sucursal / origen', syn: ['sucursalorigen', 'origen', 'nombresucursal', 'sucursal', 'tienda', 'bodega', 'almacen'] },
-    accesorio: { label: 'Accesorio (sí/no)', syn: ['accesorio', 'esaccesorio', 'categoria', 'tipoproducto'] }
+    // Entradas
+    fecha: { label: 'Fecha', syn: ['fecha', 'fechadocumento', 'fechamovimiento', 'fechaingreso'] },
+    tipo: { label: 'Tipo de ingreso', syn: ['nombreconceptoajuste', 'conceptoajuste', 'tipomovimiento', 'tipodeingreso', 'tipoingreso', 'tipo'] },
+    equipo: { label: 'Equipo / producto', syn: ['nombreproducto', 'equipo', 'descripcion', 'descripcionproducto', 'articulo', 'producto'] },
+    cantidad: { label: 'Cantidad', syn: ['cantidadvirtual', 'cantidad', 'unidades', 'cant', 'existencia', 'existencias', 'stock', 'disponible', 'saldo'] },
+    origen: { label: 'Sucursal de origen (cambios)', syn: ['sucursalorigen', 'origen', 'referencia'] },
+    recibe: { label: 'Sucursal que recibe', syn: ['nombresucursal', 'sucursaldestino'] },
+    // Inventario
+    sucursal: { label: 'Sucursal', syn: ['nombresucursal', 'sucursal', 'tienda', 'bodega', 'almacen'] },
+    marca: { label: 'Marca', syn: ['marca', 'referencia'] },
+    categoria: { label: 'Categoría', syn: ['nombresubgrupoproducto', 'subgrupo', 'categoria'] },
+    condicion: { label: 'Condición', syn: ['nombregrupoproducto', 'condicion', 'estado', 'grupo'] }
   };
   const KINDS = {
-    entries: { label: 'Entradas del mes', required: ['equipo', 'cantidad', 'tipo'], optional: ['fecha', 'documento', 'sucursal', 'accesorio'] },
-    stock: { label: 'Inventario (existencias)', required: ['equipo', 'cantidad', 'sucursal'], optional: [] }
+    entries: { label: 'Entradas', required: ['equipo', 'tipo'], optional: ['fecha', 'cantidad', 'origen', 'recibe'] },
+    stock: { label: 'Inventario (existencias)', required: ['equipo', 'cantidad', 'sucursal'], optional: ['marca', 'categoria', 'condicion'] }
   };
 
-  const STORE_KEY = 'informe-inventario-datos-v1';
+  const STORE_KEY = 'informe-inventario-datos-v2';
   const MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
 
   /* ---------- Utilidades ---------- */
@@ -64,6 +80,8 @@
   const pad = n => String(n).padStart(2, '0');
   const listJoin = a => a.length <= 1 ? a.join('') : a.slice(0, -1).join(', ') + ' y ' + a[a.length - 1];
   const plural = (n, one, many) => n === 1 ? one : many;
+  const titleCase = s => s.toLowerCase().replace(/(^|[\s\/-])\p{L}/gu, c => c.toUpperCase());
+  const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 
   function storageGet() { try { return JSON.parse(localStorage.getItem(STORE_KEY) || 'null'); } catch (e) { return null; } }
   function storageSet(v) { try { v ? localStorage.setItem(STORE_KEY, JSON.stringify(v)) : localStorage.removeItem(STORE_KEY); } catch (e) { /* sin almacenamiento */ } }
@@ -81,7 +99,6 @@
       const d = XLSX.SSF.parse_date_code(v);
       if (d) return pad(d.d) + '/' + pad(d.m) + '/' + d.y;
     }
-    if (v instanceof Date && !isNaN(v)) return pad(v.getDate()) + '/' + pad(v.getMonth() + 1) + '/' + v.getFullYear();
     const s = String(v).trim();
     let m = s.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/);
     if (m) return pad(m[1]) + '/' + pad(m[2]) + '/' + (m[3].length === 2 ? '20' + m[3] : m[3]);
@@ -89,235 +106,242 @@
     if (m) return pad(m[3]) + '/' + pad(m[2]) + '/' + m[1];
     return s;
   }
-  function parseDmy(s) {
-    const m = String(s).match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-    return m ? { d: +m[1], m: +m[2], y: +m[3], key: m[3] + m[2] + m[1] } : null;
-  }
-  function longDate(iso) {
-    const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
-    return m ? { d: +m[3], m: +m[2], y: +m[1] } : null;
-  }
+  const monthKey = fecha => { const m = String(fecha).match(/^\d{2}\/(\d{2})\/(\d{4})$/); return m ? m[2] + '-' + m[1] : ''; };
+  const monthName = key => { const [y, m] = key.split('-'); return MESES[+m - 1] + ' ' + y; };
+  const isoParts = iso => { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})$/); return m ? { d: +m[3], m: +m[2], y: +m[1] } : null; };
 
-  function titleCase(s) { return s.toLowerCase().replace(/(^|[\s\/-])\p{L}/gu, c => c.toUpperCase()); }
+  // "TechnologySales Town Center" -> "Town Center", "NOVA PRISA" -> "Novaprisa", "CAMBIOS DE CELULARES" -> "Town / City / Agalta"
   function canonBranch(v) {
-    let s = String(v == null ? '' : v).trim().replace(/\s+/g, ' ');
-    if (!s) return { name: '', alias: null };
-    const alias = BRANCH_ALIASES[norm(s)];
-    if (alias) return { name: alias, alias: s === s.toUpperCase() ? titleCase(s) : s };
-    if (s === s.toUpperCase()) s = titleCase(s);
-    return { name: s, alias: null };
-  }
-
-  function isAccessoryName(name) { const n = ' ' + name + ' '; return ACCESSORY_WORDS.some(w => n.includes(w)); }
-  function isAccessoryValue(v) {
-    const n = norm(v);
-    return ['si', 'true', '1', 'x', 'yes'].includes(n) || n.includes('accesorio');
+    const raw = String(v == null ? '' : v).trim().replace(/\s+/g, ' ');
+    if (!raw) return { name: '', known: false };
+    let n = norm(raw);
+    if (BRANCH_ALIASES[n]) return { name: BRANCH_ALIASES[n], known: true };
+    if (n.startsWith('technologysales')) n = n.slice('technologysales'.length);
+    if (BRANCHES[n]) return { name: BRANCHES[n], known: true };
+    if (BRANCH_ALIASES[n]) return { name: BRANCH_ALIASES[n], known: true };
+    return { name: raw === raw.toUpperCase() ? titleCase(raw) : raw, known: false };
   }
 
   // "13 PRO MAX 128GB VERDE" -> "13 PRO MAX 128GB"
   function modelOf(name) { const m = name.match(/^(.*?\d+\s*(GB|TB))\b/); return m ? m[1] : name; }
-  // iPhone: el nombre empieza con el número de generación ("13 PRO MAX…", "IPHONE 15…").
-  function isIphone(name) { return /^(IPHONE\s*)?\d{1,2}\s/.test(name); }
 
-  const category = r => /COMPRA/.test(r.tipo) ? (r.accesorio ? 'accessories' : 'purchases')
+  /* ---------- Clasificación de entradas ---------- */
+
+  let categoryOf = {}; // nombre de producto -> categoría (sale del inventario)
+  function isAccessory(r) {
+    const c = r.categoria || categoryOf[r.equipo];
+    if (c) return norm(c).startsWith('accesorio');
+    const n = ' ' + r.equipo + ' ';
+    return ACCESSORY_WORDS.some(w => n.includes(w));
+  }
+  const category = r => /COMPRA/.test(r.tipo) ? (isAccessory(r) ? 'accessories' : 'purchases')
     : (r.tipo === 'CAMBIOS' || r.tipo === 'CAMBIO') ? 'changes' : 'others';
 
   /* ---------- Lectura de Excel ---------- */
 
-  function detectColumns(headers) {
+  function detectColumns(headers, fields) {
     const keys = headers.map(norm);
     const used = new Set(), map = {};
-    for (const f of Object.keys(FIELDS)) {
+    for (const f of fields) {
       map[f] = null;
       const syn = FIELDS[f].syn;
       let idx = -1;
-      for (const s of syn) { idx = keys.findIndex((k, i) => k && k === s && !used.has(i)); if (idx >= 0) break; }
-      if (idx < 0) for (const s of syn) { if (s.length < 4) continue; idx = keys.findIndex((k, i) => k && k.startsWith(s) && !used.has(i)); if (idx >= 0) break; }
+      for (const s of syn) { idx = keys.findIndex((k, i) => k === s && !used.has(i)); if (idx >= 0) break; }
+      if (idx < 0) for (const s of syn) { if (s.length < 5) continue; idx = keys.findIndex((k, i) => k.startsWith(s) && !used.has(i)); if (idx >= 0) break; }
       if (idx >= 0) { map[f] = idx; used.add(idx); }
     }
     return map;
   }
-
-  function guessKind(sheetName, map) {
-    const ok = k => KINDS[k].required.every(f => map[f] != null);
-    const n = norm(sheetName);
-    if (/inv|exist|stock|corte/.test(n) && ok('stock')) return 'stock';
-    if (/entrada|ingreso|mov|compra/.test(n) && ok('entries')) return 'entries';
-    if (ok('entries')) return 'entries';
-    if (ok('stock')) return 'stock';
-    return 'ignore';
-  }
+  const kindFields = k => KINDS[k].required.concat(KINDS[k].optional);
+  const complete = (k, map) => KINDS[k].required.every(f => map[f] != null);
 
   function analyseSheet(fileName, sheetName, rows) {
-    let best = { row: 0, map: detectColumns(rows[0] || []), score: -1 };
+    let best = null;
     for (let r = 0; r < Math.min(25, rows.length); r++) {
-      const map = detectColumns(rows[r] || []);
-      const score = Object.values(map).filter(v => v != null).length;
-      if (score > best.score) best = { row: r, map, score };
+      const headers = rows[r] || [];
+      const maps = { entries: detectColumns(headers, kindFields('entries')), stock: detectColumns(headers, kindFields('stock')) };
+      const score = Math.max(...['entries', 'stock'].map(k => Object.values(maps[k]).filter(v => v != null).length + (complete(k, maps[k]) ? 10 : 0)));
+      if (!best || score > best.score) best = { row: r, maps, score };
     }
+    const label = norm(fileName + ' ' + sheetName);
+    let kind = 'ignore';
+    const okE = complete('entries', best.maps.entries), okS = complete('stock', best.maps.stock);
+    if (okS && (/inv|exist|stock|corte/.test(label) || !okE)) kind = 'stock';
+    else if (okE) kind = 'entries';
     const headers = (rows[best.row] || []).map((h, i) => String(h).trim() || ('Columna ' + (i + 1)));
-    return { fileName, sheetName, rows, headerRow: best.row, headers, map: best.map, kind: guessKind(sheetName, best.map) };
+    return { fileName, sheetName, rows, headerRow: best.row, headers, maps: best.maps, kind };
   }
 
   function sheetIssues(s) {
     if (s.kind === 'ignore') return [];
-    return KINDS[s.kind].required.filter(f => s.map[f] == null).map(f => FIELDS[f].label);
+    return KINDS[s.kind].required.filter(f => s.maps[s.kind][f] == null).map(f => FIELDS[f].label);
   }
 
   function parseSheet(s) {
-    const m = s.map, out = [];
+    const m = s.maps[s.kind], out = [];
     const cell = (row, f) => m[f] == null ? '' : row[m[f]];
     for (let i = s.headerRow + 1; i < s.rows.length; i++) {
       const row = s.rows[i] || [];
       const equipo = up(cell(row, 'equipo'));
-      const cantidad = toNumber(cell(row, 'cantidad'));
-      if (!equipo || isNaN(cantidad)) continue;
+      if (!equipo) continue;
       if (s.kind === 'entries') {
-        if (cantidad <= 0) continue;
-        const b = canonBranch(cell(row, 'sucursal'));
-        const r = {
-          fecha: toDate(cell(row, 'fecha')),
-          documento: String(cell(row, 'documento') == null ? '' : cell(row, 'documento')).trim(),
-          tipo: up(cell(row, 'tipo')),
-          equipo, cantidad,
-          sucursal: b.name,
-          accesorio: m.accesorio != null ? isAccessoryValue(cell(row, 'accesorio')) : isAccessoryName(equipo)
-        };
-        if (b.alias) r.alias = b.alias;
+        // Sin columna de cantidad, cada fila es una unidad (los reportes traen un IMEI por fila).
+        const cantidad = m.cantidad == null ? 1 : toNumber(cell(row, 'cantidad'));
+        if (!(cantidad > 0)) continue;
+        const tipo = up(cell(row, 'tipo'));
+        const r = { fecha: toDate(cell(row, 'fecha')), tipo, equipo, cantidad, origen: '', recibe: canonBranch(cell(row, 'recibe')).name };
+        if (tipo === 'CAMBIOS' || tipo === 'CAMBIO') {
+          const o = canonBranch(cell(row, 'origen'));
+          r.origen = o.known ? o.name : OTHER_ORIGIN;
+        }
         out.push(r);
       } else {
-        if (cantidad < 0) continue;
-        out.push({ equipo, sucursal: canonBranch(cell(row, 'sucursal')).name, cantidad });
+        const cantidad = toNumber(cell(row, 'cantidad'));
+        if (isNaN(cantidad)) continue;
+        out.push({
+          equipo, cantidad,
+          sucursal: canonBranch(cell(row, 'sucursal')).name,
+          marca: up(cell(row, 'marca')),
+          categoria: up(cell(row, 'categoria')),
+          condicion: up(cell(row, 'condicion'))
+        });
       }
     }
     return out;
   }
 
+  // "Inventario_02.11.26.xlsx" -> "2026-11-02"
+  function dateFromFileName(name) {
+    const m = name.match(/(\d{1,2})[._-](\d{1,2})[._-](\d{2,4})(?!\d)/);
+    if (!m) return '';
+    const y = m[3].length === 2 ? '20' + m[3] : m[3];
+    return y + '-' + pad(m[2]) + '-' + pad(m[1]);
+  }
+
   /* ---------- Estado ---------- */
 
   const PUBLISHED = window.DATOS_INFORME || { meta: {}, entries: [], stock: [] };
-  let DATA = PUBLISHED, fromExcel = false;
+  let DATA = PUBLISHED, fromExcel = false, month = '';
   let sheets = [], baseForUpload = PUBLISHED;
 
   const saved = storageGet();
   if (saved && saved.data && Array.isArray(saved.data.entries)) { DATA = saved.data; fromExcel = true; }
 
   function setData(data, excel) {
-    DATA = data; fromExcel = excel;
-    storageSet(excel ? { data, savedAt: new Date().toISOString() } : null);
+    DATA = data; fromExcel = excel; month = '';
+    storageSet(excel ? { data } : null);
     renderAll();
   }
 
-  /* ---------- Textos derivados ---------- */
-
-  function period(entries) {
-    const ds = entries.map(r => parseDmy(r.fecha)).filter(Boolean).sort((a, b) => a.key < b.key ? -1 : 1);
-    if (!ds.length) return { eyebrow: '', month: null, label: 'del período' };
-    const a = ds[0], b = ds[ds.length - 1];
-    if (a.y === b.y && a.m === b.m) {
-      return { eyebrow: a.d + '–' + b.d + ' ' + MESES[a.m - 1].toUpperCase() + ' ' + a.y, month: MESES[a.m - 1] + ' ' + a.y, label: 'de ' + MESES[a.m - 1] };
+  function months() { return [...new Set(DATA.entries.map(r => monthKey(r.fecha)).filter(Boolean))].sort(); }
+  function defaultMonth(list) {
+    if (DATA.meta.mes && list.includes(DATA.meta.mes)) return DATA.meta.mes;
+    const c = isoParts(DATA.meta.corteInventario);
+    if (c) { // el mes anterior al corte del inventario (el último mes completo)
+      const prev = c.m === 1 ? (c.y - 1) + '-12' : c.y + '-' + pad(c.m - 1);
+      if (list.includes(prev)) return prev;
     }
-    return {
-      eyebrow: a.d + ' ' + MESES[a.m - 1].toUpperCase() + ' ' + a.y + ' – ' + b.d + ' ' + MESES[b.m - 1].toUpperCase() + ' ' + b.y,
-      month: null, label: 'del período'
-    };
+    return list[list.length - 1] || '';
   }
+  const monthEntries = () => month ? DATA.entries.filter(r => monthKey(r.fecha) === month) : DATA.entries;
 
   /* ---------- Render ---------- */
 
   function renderSource() {
     const n = DATA.entries.length, s = DATA.stock.length;
-    $('srcState').innerHTML = fromExcel
-      ? '<b>Datos cargados desde Excel</b> (' + esc(DATA.meta.fuente || 'archivo') + ') · ' + n + ' entradas · ' + s + ' filas de inventario. ' +
-        '<span class="note">Solo se ven en este navegador hasta que publiques el archivo datos.js.</span>'
-      : '<b>Datos publicados</b> · ' + n + ' entradas · ' + s + ' filas de inventario.';
+    $('srcState').innerHTML = (fromExcel
+      ? '<b>Datos cargados desde Excel</b> (' + esc(DATA.meta.fuente || 'archivo') + ')'
+      : '<b>Datos publicados</b>' + (DATA.meta.fuente ? ' (' + esc(DATA.meta.fuente) + ')' : '')) +
+      ' · ' + n + ' entradas · ' + s + ' filas de inventario.' +
+      (fromExcel ? ' <span class="note">Solo se ven en este navegador hasta que publiques el archivo datos.js.</span>' : '');
     $('downloadData').hidden = !fromExcel;
     $('resetData').hidden = !fromExcel;
     $('corte').value = DATA.meta.corteInventario || '';
+    const list = months();
+    if (!list.includes(month)) month = defaultMonth(list);
+    $('month').innerHTML = list.map(k => '<option value="' + k + '">' + cap(monthName(k)) + '</option>').join('');
+    $('month').value = month;
+    $('monthLabel').hidden = list.length < 2;
   }
 
   function renderSummary() {
-    const p = period(DATA.entries);
-    const subtitle = 'Entradas ' + p.label + ' y seguimiento de existencias' + ($('onlyIphone').checked ? ' de iPhone' : '');
-    $('subtitle').textContent = subtitle;
-    $('sumEyebrow').textContent = 'ENTRADAS REGISTRADAS' + (p.eyebrow ? ' · ' + p.eyebrow : '');
-    document.title = 'TechnologySales — Informe de inventario' + (p.month ? ' · ' + p.month : '');
+    const rows = monthEntries();
+    const mName = month ? monthName(month) : '';
+    const days = rows.map(r => +r.fecha.slice(0, 2)).filter(Boolean);
+    const brand = $('stockBrand').value;
+    $('subtitle').textContent = 'Entradas ' + (mName ? 'de ' + mName.split(' ')[0] : 'del período') + ' y seguimiento de existencias' +
+      (brand && brand !== 'all' ? ' de ' + (brand === 'IPHONE' ? 'iPhone' : titleCase(brand)) : '');
+    $('sumEyebrow').textContent = 'ENTRADAS REGISTRADAS' + (mName ? ' · ' + Math.min(...days) + '–' + Math.max(...days) + ' ' + mName.toUpperCase() : '');
+    document.title = 'TechnologySales — Informe de inventario' + (mName ? ' · ' + mName : '');
 
     const metrics = [['purchases', 'Dispositivos comprados'], ['changes', 'Equipos en cambio'], ['others', 'Otros ingresos'], ['accessories', 'Accesorios comprados']];
     $('entryCards').innerHTML = metrics.map(([k, l]) =>
-      '<button class="card" data-kind="' + k + '"><strong>' + sum(DATA.entries.filter(r => category(r) === k)) + '</strong><span>' + l + '</span></button>').join('');
-    $('entryTotal').textContent = sum(DATA.entries);
+      '<button class="card" data-kind="' + k + '"><strong>' + sum(rows.filter(r => category(r) === k)) + '</strong><span>' + l + '</span></button>').join('');
+    $('entryTotal').textContent = sum(rows);
 
-    const c = longDate(DATA.meta.corteInventario);
-    $('sumText').textContent = 'Las entradas registradas describen los movimientos ' + (p.month ? 'de ' + p.month.split(' ')[0] : 'del período') + '. ' +
+    const c = isoParts(DATA.meta.corteInventario);
+    $('sumText').textContent = 'Las entradas registradas describen los movimientos ' + (mName ? 'de ' + mName.split(' ')[0] : 'del período') + '. ' +
       (c ? 'Las existencias disponibles se consultan en el corte de inventario del ' + c.d + ' de ' + MESES[c.m - 1] + ' de ' + c.y + '.'
          : 'Las existencias disponibles se consultan en la pestaña de existencias.');
 
     const others = new Map();
-    DATA.entries.filter(r => category(r) === 'others').forEach(r => others.set(r.tipo, (others.get(r.tipo) || 0) + r.cantidad));
+    rows.filter(r => category(r) === 'others').forEach(r => others.set(r.tipo, (others.get(r.tipo) || 0) + r.cantidad));
     const parts = [...others].sort((a, b) => b[1] - a[1]).map(([t, n]) => {
       const lbl = TYPE_LABELS[t] || [t.toLowerCase(), t.toLowerCase()];
       return n + ' ' + plural(n, lbl[0], lbl[1]);
     });
     const acc = new Map();
-    DATA.entries.filter(r => category(r) === 'accessories').forEach(r => acc.set(r.equipo, (acc.get(r.equipo) || 0) + r.cantidad));
+    rows.filter(r => category(r) === 'accessories').forEach(r => acc.set(r.equipo, (acc.get(r.equipo) || 0) + r.cantidad));
     const accParts = [...acc].map(([name, n]) => n > 1 ? name + ' (' + n + ')' : name);
     let note = '';
     if (parts.length) note += 'Otros ingresos: ' + listJoin(parts) + '. ';
     if (accParts.length) note += 'Accesorios comprados: ' + listJoin(accParts) + '.';
     $('sumNote').textContent = note;
     $('sumNote').hidden = !note;
-
-    const types = [...new Set(DATA.entries.map(category))];
-    [...$('entryType').options].forEach(o => { o.hidden = o.value !== 'all' && !types.includes(o.value); });
     renderEntries();
   }
 
   function renderEntries() {
     const t = $('entryType').value, q = $('entrySearch').value.toLowerCase();
-    const rows = DATA.entries.filter(r => (t === 'all' || category(r) === t) && r.equipo.toLowerCase().includes(q));
+    const rows = monthEntries().filter(r => (t === 'all' || category(r) === t) && r.equipo.toLowerCase().includes(q));
     $('entryCount').textContent = rows.length + ' registros · ' + sum(rows) + ' unidades';
-    $('entryRows').innerHTML = rows.map(r => '<tr><td>' + esc(r.fecha) + '</td><td>' + esc(r.documento) + '</td><td>' + esc(r.equipo) + '</td><td>' + esc(r.tipo) +
-      '</td><td class="num">' + r.cantidad + '</td></tr>').join('') || '<tr><td colspan="5" class="empty">No hay resultados con estos filtros.</td></tr>';
+    $('entryRows').innerHTML = rows.map(r => '<tr><td>' + esc(r.fecha) + '</td><td>' + esc(r.equipo) + '</td><td>' + esc(r.tipo) + '</td><td>' +
+      esc(r.origen || r.recibe || '') + '</td><td class="num">' + r.cantidad + '</td></tr>').join('') ||
+      '<tr><td colspan="5" class="empty">No hay resultados con estos filtros.</td></tr>';
   }
 
+  const isGroup = b => GROUPED.includes(b) || b === OTHER_ORIGIN;
   function changeBranches() {
     const counts = new Map();
-    DATA.entries.filter(r => category(r) === 'changes').forEach(r => {
-      const b = r.sucursal || 'Sin sucursal';
+    monthEntries().filter(r => category(r) === 'changes').forEach(r => {
+      const b = r.origen || OTHER_ORIGIN;
       counts.set(b, (counts.get(b) || 0) + r.cantidad);
     });
-    return [...counts].sort((a, b) => (a[0].includes('/') - b[0].includes('/')) || b[1] - a[1]);
+    return [...counts].sort((a, b) => (isGroup(a[0]) - isGroup(b[0])) || (a[0] === OTHER_ORIGIN) - (b[0] === OTHER_ORIGIN) || b[1] - a[1]);
   }
 
   function renderChanges() {
-    const p = period(DATA.entries);
-    $('chgEyebrow').textContent = 'CAMBIOS REGISTRADOS' + (p.month ? ' · ' + p.month.toUpperCase() : p.eyebrow ? ' · ' + p.eyebrow : '');
+    $('chgEyebrow').textContent = 'CAMBIOS REGISTRADOS' + (month ? ' · ' + monthName(month).toUpperCase() : '');
     const list = changeBranches();
     const total = list.reduce((a, b) => a + b[1], 0);
     const max = Math.max(1, ...list.map(b => b[1]));
     $('chgTotal').textContent = total + ' ' + plural(total, 'equipo en cambio', 'equipos en cambio');
     $('bars').innerHTML = list.map(([b, n]) =>
-      '<button class="barrow' + (b.includes('/') ? ' grouped' : '') + '" data-branch="' + esc(b) + '" aria-label="' + esc(b) + ': ' + n + ' ' + plural(n, 'equipo', 'equipos') + '. Ver detalle"><span>' + esc(b) +
-      '</span><span class="track"><span class="fill" style="width:' + (n / max * 100) + '%"></span></span><b>' + n + '</b></button>').join('') ||
+      '<button class="barrow' + (isGroup(b) ? ' grouped' : '') + '" data-branch="' + esc(b) + '" aria-label="' + esc(b) + ': ' + n + ' ' + plural(n, 'equipo', 'equipos') +
+      '. Ver detalle"><span>' + esc(b) + '</span><span class="track"><span class="fill" style="width:' + (n / max * 100) + '%"></span></span><b>' + n + '</b></button>').join('') ||
       '<p class="empty">No hay cambios registrados.</p>';
 
-    const top = list.filter(b => !b[0].includes('/')).sort((a, b) => b[1] - a[1])[0];
+    const top = list.filter(b => !isGroup(b[0])).sort((a, b) => b[1] - a[1])[0];
     if (top && total) {
       $('chgBig').textContent = Math.round(top[1] / total * 100) + ' %';
       $('chgTop').textContent = 'corresponde a ' + top[0];
     } else { $('chgBig').textContent = '—'; $('chgTop').textContent = ''; }
 
     const notes = [];
-    list.filter(b => b[0].includes('/')).forEach(([b, n]) => notes.push('<p>Los ' + n + ' equipos de ' + esc(b) + ' se conservan agrupados.</p>'));
-    const aliases = new Map();
-    DATA.entries.filter(r => category(r) === 'changes' && r.alias).forEach(r => {
-      const k = r.alias + '→' + r.sucursal; aliases.set(k, (aliases.get(k) || 0) + r.cantidad);
-    });
-    aliases.forEach((n, k) => {
-      const [from, to] = k.split('→');
-      notes.push('<p class="note">' + (n === 1 ? 'El equipo identificado como ' + esc(from) + ' está incluido en ' : 'Los ' + n + ' equipos identificados como ' + esc(from) + ' están incluidos en ') + esc(to) + '.</p>');
-    });
+    list.filter(b => GROUPED.includes(b[0])).forEach(([b, n]) =>
+      notes.push('<p>' + (n === 1 ? 'El equipo de ' : 'Los ' + n + ' equipos de ') + esc(b) + (n === 1 ? ' se conserva agrupado' : ' se conservan agrupados') + ' (registrados como cambios de celulares).</p>'));
+    const other = list.find(b => b[0] === OTHER_ORIGIN);
+    if (other) notes.push('<p class="note">' + other[1] + ' ' + plural(other[1], 'equipo no indica', 'equipos no indican') + ' una sucursal de origen reconocible en la columna Referencia.</p>');
     $('chgNotes').innerHTML = notes.join('');
 
     const sel = $('changeBranch'), cur = sel.value;
@@ -328,25 +352,41 @@
 
   function renderChangeRows() {
     const b = $('changeBranch').value;
-    const rows = DATA.entries.filter(r => category(r) === 'changes' && (b === 'all' || (r.sucursal || 'Sin sucursal') === b));
-    $('changeCount').textContent = sum(rows) + ' equipos';
-    $('changeRows').innerHTML = rows.map(r => '<tr><td>' + esc(r.sucursal || 'Sin sucursal') + '</td><td>' + esc(r.equipo) + '</td><td>' + esc(r.documento) +
-      '</td><td class="num">' + r.cantidad + '</td></tr>').join('') || '<tr><td colspan="4" class="empty">No hay cambios registrados.</td></tr>';
+    const rows = monthEntries().filter(r => category(r) === 'changes' && (b === 'all' || (r.origen || OTHER_ORIGIN) === b));
+    $('changeCount').textContent = sum(rows) + ' ' + plural(sum(rows), 'equipo', 'equipos');
+    $('changeRows').innerHTML = rows.map(r => '<tr><td>' + esc(r.origen || OTHER_ORIGIN) + '</td><td>' + esc(r.equipo) + '</td><td>' + esc(r.fecha) +
+      '</td><td>' + esc(r.recibe) + '</td><td class="num">' + r.cantidad + '</td></tr>').join('') || '<tr><td colspan="5" class="empty">No hay cambios registrados.</td></tr>';
   }
 
+  /* ---------- Existencias ---------- */
+
   let shown = [];
-  function stockRows() { return DATA.stock.filter(r => !$('onlyIphone').checked || isIphone(r.equipo)); }
+  function fillSelect(id, values, allLabel, preferred) {
+    const sel = $(id), cur = sel.dataset.touched ? sel.value : preferred;
+    sel.innerHTML = '<option value="all">' + allLabel + '</option>' + values.map(v => '<option value="' + esc(v) + '">' + esc(v === 'IPHONE' ? 'iPhone' : titleCase(v)) + '</option>').join('');
+    sel.value = values.includes(cur) ? cur : 'all';
+    sel.closest('label').hidden = !values.length;
+  }
+  const distinct = (rows, k) => [...new Set(rows.map(r => r[k]).filter(Boolean))].sort();
+
+  function stockRows(ignore) {
+    const f = { marca: $('stockBrand').value, categoria: $('stockCat').value, condicion: $('stockCond').value };
+    return DATA.stock.filter(r => Object.keys(f).every(k => k === ignore || f[k] === 'all' || r[k] === f[k]));
+  }
 
   function renderStockFrame() {
-    const c = longDate(DATA.meta.corteInventario);
-    const kind = $('onlyIphone').checked ? 'INVENTARIO IPHONE' : 'INVENTARIO';
-    $('stockEyebrow').textContent = kind + (c ? ' · CORTE ' + pad(c.d) + ' ' + MESES[c.m - 1].toUpperCase() + ' ' + c.y : '');
-    const branches = [...new Set(stockRows().map(r => r.sucursal).filter(Boolean))].sort();
+    fillSelect('stockBrand', distinct(DATA.stock, 'marca'), 'Todas las marcas', 'IPHONE');
+    fillSelect('stockCat', distinct(stockRows('categoria'), 'categoria'), 'Todas las categorías', 'CELULARES');
+    fillSelect('stockCond', distinct(stockRows('condicion'), 'condicion'), 'Todas', 'all');
+    const branches = distinct(stockRows(), 'sucursal');
     const sel = $('stockBranch'), cur = sel.value;
     sel.innerHTML = '<option value="all">Todas las sucursales</option>' + branches.map(b => '<option>' + esc(b) + '</option>').join('');
     sel.value = branches.includes(cur) ? cur : 'all';
-    const aliasNames = Object.keys(BRANCH_ALIASES).length ? 'Los nombres de sucursal alternativos se agrupan con su sucursal (por ejemplo, TechnologySales se cuenta como Novaprisa).' : '';
-    $('aliasNote').textContent = aliasNames;
+
+    const c = isoParts(DATA.meta.corteInventario);
+    const b = $('stockBrand').value, cat = $('stockCat').value, cond = $('stockCond').value;
+    $('stockEyebrow').textContent = 'INVENTARIO' + (b !== 'all' ? ' ' + b : '') + (cat !== 'all' ? ' · ' + cat : '') + (cond !== 'all' ? ' · ' + cond : '') +
+      (c ? ' · CORTE ' + pad(c.d) + ' ' + MESES[c.m - 1].toUpperCase() + ' ' + c.y : '');
     renderStock();
   }
 
@@ -362,23 +402,28 @@
   }
 
   function renderStock() {
-    const all = aggregateStock($('stockBranch').value, $('groupBy').value === 'name');
+    let all = aggregateStock($('stockBranch').value, $('groupBy').value === 'name');
+    if ($('hideZero').checked) all = all.filter(r => r.quantity > 0);
     $('stockCards').innerHTML = [
-      ['0', all.filter(r => r.quantity === 0).length, 'Grupos agotados'],
+      ['0', all.filter(r => r.quantity <= 0).length, 'Grupos agotados'],
       ['1to4', all.filter(r => r.quantity > 0 && r.quantity < 5).length, 'Grupos con 1 a 4'],
       ['5to9', all.filter(r => r.quantity >= 5 && r.quantity < 10).length, 'Grupos con 5 a 9'],
       ['all', all.reduce((a, r) => a + r.quantity, 0), 'Unidades en existencia']
     ].map(([k, v, l]) => '<button class="card" data-level="' + k + '"><strong>' + v + '</strong><span>' + l + '</span></button>').join('');
     const t = $('threshold').value, q = $('stockSearch').value.toLowerCase();
-    shown = all.filter(r => (t === 'all' || t === '0' && r.quantity === 0 || t === '1to4' && r.quantity > 0 && r.quantity < 5 ||
+    shown = all.filter(r => (t === 'all' || t === '0' && r.quantity <= 0 || t === '1to4' && r.quantity > 0 && r.quantity < 5 ||
       t === '5to9' && r.quantity >= 5 && r.quantity < 10 || t === '5' && r.quantity < 5 || t === '10' && r.quantity < 10) && r.name.toLowerCase().includes(q));
     $('stockCount').textContent = shown.length + ' grupos mostrados de ' + all.length + ' · ' + shown.reduce((a, r) => a + r.quantity, 0) + ' unidades en el resultado';
     $('stockRows').innerHTML = shown.map(r => '<tr><td>' + esc(r.name) + '</td><td class="num"><b>' + r.quantity + '</b></td><td><span class="tag ' +
-      (r.quantity === 0 ? 'red' : r.quantity < 5 ? 'amber' : '') + '">' + (r.quantity === 0 ? 'Agotado' : r.quantity < 5 ? '1 a 4' : r.quantity < 10 ? '5 a 9' : '10 o más') +
+      (r.quantity <= 0 ? 'red' : r.quantity < 5 ? 'amber' : '') + '">' + (r.quantity <= 0 ? 'Agotado' : r.quantity < 5 ? '1 a 4' : r.quantity < 10 ? '5 a 9' : '10 o más') +
       '</span></td></tr>').join('') || '<tr><td colspan="3" class="empty">No hay resultados con estos filtros.</td></tr>';
   }
 
-  function renderAll() { renderSource(); renderSummary(); renderChanges(); renderStockFrame(); }
+  function renderAll() {
+    categoryOf = {};
+    DATA.stock.forEach(r => { if (r.categoria) categoryOf[r.equipo] = r.categoria; });
+    renderSource(); renderStockFrame(); renderSummary(); renderChanges();
+  }
 
   /* ---------- Carga de Excel ---------- */
 
@@ -386,72 +431,68 @@
     const box = $('review');
     if (!sheets.length) { box.hidden = true; box.innerHTML = ''; return; }
     box.hidden = false;
-    box.innerHTML = '<h3>Hojas encontradas</h3><p class="note">Revisa que cada hoja tenga el uso y las columnas correctas. Los cambios se aplican al instante.</p>' +
+    box.innerHTML = '<h3>Archivos leídos</h3><p class="note">Revisa que cada hoja tenga el uso y las columnas correctas. Los cambios se aplican al instante.</p>' +
       sheets.map((s, i) => {
         const issues = sheetIssues(s);
         const count = s.kind === 'ignore' || issues.length ? 0 : parseSheet(s).length;
         const status = s.kind === 'ignore' ? '<span class="tag">No se usa</span>'
           : issues.length ? '<span class="tag red">Falta: ' + esc(issues.join(', ')) + '</span>'
-          : '<span class="tag ok">' + count + ' filas leídas</span>';
-        const fields = s.kind === 'ignore' ? [] : KINDS[s.kind].required.concat(KINDS[s.kind].optional);
-        return '<div class="sheet"><div class="sheet-head"><b>' + esc(s.fileName) + (s.sheetName ? ' · ' + esc(s.sheetName) : '') + '</b> ' + status + '</div>' +
-          '<div class="filters"><label>Usar como<select data-i="' + i + '" data-k="kind">' +
+          : '<span class="tag ok">' + KINDS[s.kind].label + ' · ' + count + ' filas leídas</span>';
+        const fields = s.kind === 'ignore' ? [] : kindFields(s.kind);
+        return '<details class="sheet"' + (issues.length || s.kind === 'ignore' ? ' open' : '') + '><summary><b>' + esc(s.fileName) + (s.sheetName ? ' · ' + esc(s.sheetName) : '') +
+          '</b> ' + status + '</summary><div class="filters"><label>Usar como<select data-i="' + i + '" data-k="kind">' +
           [['ignore', 'No usar'], ['entries', KINDS.entries.label], ['stock', KINDS.stock.label]].map(([v, l]) => '<option value="' + v + '"' + (s.kind === v ? ' selected' : '') + '>' + l + '</option>').join('') +
           '</select></label>' +
           fields.map(f => '<label>' + FIELDS[f].label + (KINDS[s.kind].required.includes(f) ? ' *' : '') + '<select data-i="' + i + '" data-f="' + f + '"><option value="">— sin columna —</option>' +
-            s.headers.map((h, j) => '<option value="' + j + '"' + (s.map[f] === j ? ' selected' : '') + '>' + esc(h) + '</option>').join('') + '</select></label>').join('') +
-          '</div></div>';
+            s.headers.map((h, j) => '<option value="' + j + '"' + (s.maps[s.kind][f] === j ? ' selected' : '') + '>' + esc(h) + '</option>').join('') + '</select></label>').join('') +
+          '</div></details>';
       }).join('');
   }
 
   function applySheets() {
     const usable = sheets.filter(s => s.kind !== 'ignore' && !sheetIssues(s).length);
     const entrySheets = usable.filter(s => s.kind === 'entries'), stockSheets = usable.filter(s => s.kind === 'stock');
-    const msg = [];
     if (!usable.length) {
-      $('loadMsg').innerHTML = '<span class="tag red">No se encontró una hoja de entradas ni de inventario.</span> Indica abajo qué columna corresponde a cada dato.';
+      $('loadMsg').innerHTML = '<span class="tag red">No se encontró un reporte de entradas ni de inventario.</span> Indica abajo qué columna corresponde a cada dato.';
       return;
     }
+    const corte = stockSheets.map(s => dateFromFileName(s.fileName)).find(Boolean) || $('corte').value || baseForUpload.meta.corteInventario || '';
+    const stock = stockSheets.length ? [].concat(...stockSheets.map(parseSheet)) : baseForUpload.stock;
+    const entries = entrySheets.length ? [].concat(...entrySheets.map(parseSheet)) : baseForUpload.entries;
+    const cats = {};
+    stock.forEach(r => { if (r.categoria) cats[r.equipo] = r.categoria; });
+    entries.forEach(r => { r.categoria = r.categoria || cats[r.equipo] || ''; });
     const data = {
-      meta: Object.assign({}, baseForUpload.meta, {
-        fuente: [...new Set(sheets.map(s => s.fileName))].join(', '),
-        corteInventario: $('corte').value || baseForUpload.meta.corteInventario || ''
-      }),
-      entries: entrySheets.length ? [].concat(...entrySheets.map(parseSheet)) : baseForUpload.entries,
-      stock: stockSheets.length ? [].concat(...stockSheets.map(parseSheet)) : baseForUpload.stock
+      meta: { fuente: [...new Set(usable.map(s => s.fileName))].join(', '), corteInventario: corte },
+      entries, stock
     };
-    msg.push(entrySheets.length ? data.entries.length + ' entradas leídas' : 'no se cargaron entradas (se mantienen las anteriores)');
-    msg.push(stockSheets.length ? data.stock.length + ' filas de inventario leídas' : 'no se cargó inventario (se mantiene el anterior)');
+    const msg = [
+      entrySheets.length ? entries.length + ' entradas leídas' : 'no se cargaron entradas (se mantienen las anteriores)',
+      stockSheets.length ? stock.length + ' filas de inventario leídas' : 'no se cargó inventario (se mantiene el anterior)'
+    ];
     $('loadMsg').innerHTML = '<span class="tag ok">Informe actualizado</span> ' + esc(msg.join(' · ')) + '.' +
-      (stockSheets.length ? ' <b>Revisa la fecha de corte del inventario.</b>' : '');
+      (stockSheets.length ? ' <b>Revisa la fecha de corte del inventario y el mes del informe.</b>' : '');
     setData(data, true);
   }
 
   async function loadFiles(files) {
     if (!window.XLSX) { $('loadMsg').innerHTML = '<span class="tag red">No se pudo cargar el lector de Excel.</span>'; return; }
     $('loadMsg').textContent = 'Leyendo archivo…';
-    baseForUpload = fromExcel ? DATA : PUBLISHED;
-    sheets = [];
-    let stockFile = null;
+    baseForUpload = DATA;
+    const fresh = [];
     for (const file of files) {
       try {
         const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
         for (const name of wb.SheetNames) {
           const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: true, defval: '', blankrows: false });
-          if (!rows.length) continue;
-          const s = analyseSheet(file.name, wb.SheetNames.length > 1 ? name : '', rows);
-          sheets.push(s);
-          if (s.kind === 'stock') stockFile = file;
+          if (rows.length) fresh.push(analyseSheet(file.name, wb.SheetNames.length > 1 ? name : '', rows));
         }
       } catch (e) {
         $('loadMsg').innerHTML = '<span class="tag red">No se pudo leer ' + esc(file.name) + '.</span> ' + esc(e.message || '');
         return;
       }
     }
-    if (stockFile && stockFile.lastModified) {
-      const d = new Date(stockFile.lastModified);
-      $('corte').value = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
-    }
+    sheets = fresh;
     renderReview();
     applySheets();
   }
@@ -460,24 +501,6 @@
     const url = URL.createObjectURL(new Blob([content], { type }));
     const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-
-  function downloadTemplate() {
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
-      ['Fecha', 'Documento', 'Tipo', 'Equipo', 'Cantidad', 'Sucursal origen', 'Accesorio'],
-      ['01/09/2026', '641', 'COMPRAS LOCALES', '17 PRO MAX 256GB NARANJA ESIM', 1, '', 'No'],
-      ['01/09/2026', '642', 'CAMBIOS', '14 PRO MAX 256GB NEGRO ESIM', 1, 'Town Center', 'No'],
-      ['12/09/2026', '705', 'COMPRAS LOCALES', 'CUBO 20W ORIGINAL', 1, '', 'Sí'],
-      ['07/09/2026', '672', 'REINGRESO', '15 PRO MAX 256GB AZUL ESIM', 1, '', 'No']
-    ]), 'Entradas');
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
-      ['Equipo', 'NombreSucursal', 'Existencia'],
-      ['13 PRO MAX 128GB VERDE', 'Novaprisa', 5],
-      ['13 PRO MAX 128GB VERDE', 'Town Center', 1],
-      ['15 PRO 128GB AZUL ESIM', 'Novaprisa', 0]
-    ]), 'Inventario');
-    XLSX.writeFile(wb, 'plantilla-informe-inventario.xlsx');
   }
 
   /* ---------- Eventos ---------- */
@@ -504,14 +527,18 @@
     const b = e.target.closest('[data-level]'); if (!b) return;
     $('threshold').value = b.dataset.level; renderStock();
   });
-  ['threshold', 'stockBranch', 'groupBy', 'stockSearch'].forEach(id => $(id).addEventListener('input', renderStock));
-  $('onlyIphone').addEventListener('change', () => { renderSummary(); renderStockFrame(); });
+  ['threshold', 'stockBranch', 'groupBy', 'stockSearch', 'hideZero'].forEach(id => $(id).addEventListener('input', renderStock));
+  ['stockBrand', 'stockCat', 'stockCond'].forEach(id => $(id).addEventListener('change', () => {
+    $(id).dataset.touched = '1'; renderStockFrame(); renderSummary();
+  }));
+
+  $('month').addEventListener('change', () => { month = $('month').value; renderSummary(); renderChanges(); });
 
   $('export').onclick = () => {
     const cell = v => '"' + String(v).replace(/"/g, '""') + '"';
     const csv = '﻿' + [['Equipo', 'Existencias'], ...shown.map(r => [r.name, r.quantity])].map(r => r.map(cell).join(';')).join('\r\n');
     const c = DATA.meta.corteInventario ? '-' + DATA.meta.corteInventario.split('-').reverse().join('-') : '';
-    download('existencias' + ($('onlyIphone').checked ? '-iphone' : '') + c + '.csv', csv, 'text/csv;charset=utf-8');
+    download('existencias' + c + '.csv', csv, 'text/csv;charset=utf-8');
   };
 
   $('fileInput').addEventListener('change', e => { if (e.target.files.length) loadFiles([...e.target.files]); e.target.value = ''; });
@@ -523,19 +550,21 @@
   $('review').addEventListener('change', e => {
     const el = e.target, s = sheets[+el.dataset.i]; if (!s) return;
     if (el.dataset.k === 'kind') s.kind = el.value;
-    else if (el.dataset.f) s.map[el.dataset.f] = el.value === '' ? null : +el.value;
+    else if (el.dataset.f) s.maps[s.kind][el.dataset.f] = el.value === '' ? null : +el.value;
     renderReview(); applySheets();
   });
 
   $('corte').addEventListener('change', () => {
-    const data = Object.assign({}, DATA, { meta: Object.assign({}, DATA.meta, { corteInventario: $('corte').value }) });
-    setData(data, true);
+    const keep = month;
+    setData(Object.assign({}, DATA, { meta: Object.assign({}, DATA.meta, { corteInventario: $('corte').value }) }), true);
+    if (months().includes(keep)) { month = keep; renderSource(); renderSummary(); renderChanges(); }
   });
 
-  $('template').onclick = downloadTemplate;
-  $('downloadData').onclick = () => download('datos.js',
-    '// Datos que muestra la página al abrirse.\n// Se generan con el botón "Descargar datos.js" después de cargar un Excel.\nwindow.DATOS_INFORME = ' + JSON.stringify(DATA, null, 1) + ';\n',
-    'text/javascript;charset=utf-8');
+  $('downloadData').onclick = () => {
+    const out = Object.assign({}, DATA, { meta: Object.assign({}, DATA.meta, { mes: month }) });
+    download('datos.js', '// Datos que muestra la página al abrirse.\n// Se generan con el botón "Descargar datos.js" después de cargar los Excel.\nwindow.DATOS_INFORME = ' +
+      JSON.stringify(out) + ';\n', 'text/javascript;charset=utf-8');
+  };
   $('resetData').onclick = () => { sheets = []; renderReview(); $('loadMsg').textContent = ''; setData(PUBLISHED, false); };
 
   renderAll();
