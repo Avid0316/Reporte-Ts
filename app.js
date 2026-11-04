@@ -319,13 +319,14 @@
     const days = rows.map(r => +r.fecha.slice(0, 2)).filter(Boolean);
     $('sumEyebrow').textContent = 'ENTRADAS REGISTRADAS · ' + (days.length ? Math.min(...days) + '–' + Math.max(...days) + ' ' : '') + mName.toUpperCase();
     document.title = 'TechnologySales — Informe de inventario · ' + mName;
+    $('sumTitle').textContent = 'Resumen de ' + mName.split(' ')[0];
 
     const empty = !rows.length;
     $('sumEmpty').hidden = !empty; $('sumBody').hidden = empty;
     $('sumEmpty').innerHTML = 'No hay entradas cargadas para ' + esc(mName) + '.<br><span class="note">Para agregarlas: <b>Actualizar datos → Cargar Excel de entradas</b>.</span>';
     if (empty) return;
 
-    const metrics = [['purchases', 'Dispositivos comprados'], ['changes', 'Equipos en cambio'], ['others', 'Otros ingresos'], ['accessories', 'Accesorios comprados']];
+    const metrics = [['purchases', 'Dispositivos comprados'], ['changes', 'Equipos en cambio'], ['others', 'Reingresos y otros'], ['accessories', 'Accesorios comprados']];
     $('entryCards').innerHTML = metrics.map(([k, l]) =>
       '<button class="card" data-kind="' + k + '"><strong>' + sum(rows.filter(r => category(r) === k)) + '</strong><span>' + l + '</span></button>').join('');
     const devices = sum(rows.filter(isGoodsOnly)), accUnits = sum(rows.filter(r => category(r) === 'accessories'));
@@ -350,7 +351,7 @@
     rows.filter(r => category(r) === 'supplies').forEach(r => sup.set(r.equipo, (sup.get(r.equipo) || 0) + r.cantidad));
     const supParts = [...sup].map(([name, n]) => name + ' (' + n + ')');
     let note = '';
-    if (parts.length) note += 'Otros ingresos: ' + listJoin(parts) + '. ';
+    if (parts.length) note += 'Reingresos y otros: ' + listJoin(parts) + '. ';
     if (accParts.length) note += 'Accesorios comprados: ' + listJoin(accParts) + '. ';
     if (supParts.length) note += 'Insumos (no se cuentan como equipos ni accesorios): ' + listJoin(supParts) + '.';
     $('sumNote').textContent = note;
