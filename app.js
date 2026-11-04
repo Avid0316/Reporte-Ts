@@ -2,12 +2,14 @@
  * Informe de inventario — lógica de la página.
  *
  * - Muestra los datos de datos.js (window.DATOS_INFORME).
- * - "Cargar Excel" lee los reportes del sistema (ENTRADAS e Inventario) u otros
- *   Excel/CSV: detecta qué archivo es cada uno y qué columna es cada dato.
+ * - Los 12 meses del año se eligen arriba. En "Actualizar datos" se cargan las
+ *   entradas de cada mes (reporte ENTRADAS del sistema) y el inventario general.
+ * - "Guardar cambios" publica datos.js en GitHub (con un token del usuario) o lo
+ *   descarga para subirlo a mano. Hasta entonces, los cambios viven en el navegador.
  * - Todas las cifras y los textos del informe se calculan de los datos.
  *
  * Formato de los datos:
- *   meta:    { fuente, corteInventario: "AAAA-MM-DD", mes: "AAAA-MM" }
+ *   meta:    { corteInventario: "AAAA-MM-DD", fuenteInventario, meses: { "AAAA-MM": { fuente, cargado } } }
  *   entries: [{ fecha: "dd/mm/aaaa", tipo, equipo, cantidad, origen, recibe, categoria }]
  *   stock:   [{ equipo, sucursal, cantidad, marca, categoria, condicion }]
  */
@@ -224,69 +226,111 @@
 
   /* ---------- Estado ---------- */
 
-  const PUBLISHED = window.DATOS_INFORME || { meta: {}, entries: [], stock: [] };
-  let DATA = PUBLISHED, fromExcel = false, month = '';
-  let sheets = [], baseForUpload = PUBLISHED;
+  // Repositorio donde se guarda datos.js (en GitHub Pages se deduce de la dirección).
+  const GITHUB_REPO = { owner: 'avid0316', repo: 'Reporte-Ts' };
+  const TOKEN_KEY = 'informe-gh-token';
 
-  const saved = storageGet();
-  if (saved && saved.data && Array.isArray(saved.data.entries)) { DATA = saved.data; fromExcel = true; }
+  let PUBLISHED = window.DATOS_INFORME || { meta: {}, entries: [], stock: [] };
+  if (!PUBLISHED.meta) PUBLISHED.meta = {};
+  let DATA = PUBLISHED, draft = null, month = '';
+  let sheets = [], uploadKind = null, uploadMonth = '', baseForUpload = PUBLISHED;
+  const TODAY = new Date();
+  const CURRENT = TODAY.getFullYear() + '-' + pad(TODAY.getMonth() + 1);
+  const todayIso = TODAY.getFullYear() + '-' + pad(TODAY.getMonth() + 1) + '-' + pad(TODAY.getDate());
 
-  function setData(data, excel) {
-    DATA = data; fromExcel = excel; month = '';
-    storageSet(excel ? { data } : null);
+  // Cambios sin guardar de este navegador: { data, changes: ['entradas de septiembre 2026', ...] }
+  draft = storageGet();
+  if (draft && draft.data && Array.isArray(draft.data.entries) && Array.isArray(draft.changes)) {
+    if (JSON.stringify(draft.data) === JSON.stringify(PUBLISHED)) { draft = null; storageSet(null); } // ya está publicado
+    else DATA = draft.data;
+  } else draft = null;
+
+  function setDraft(data, changes) {
+    const list = draft ? draft.changes.filter(c => !changes.includes(c)) : [];
+    draft = { data, changes: list.concat(changes) };
+    DATA = data;
+    storageSet(draft);
     renderAll();
   }
+  function clearDraft() { draft = null; storageSet(null); DATA = PUBLISHED; renderAll(); }
 
-  function months() { return [...new Set(DATA.entries.map(r => monthKey(r.fecha)).filter(Boolean))].sort(); }
-  function defaultMonth(list) {
-    if (DATA.meta.mes && list.includes(DATA.meta.mes)) return DATA.meta.mes;
-    const c = isoParts(DATA.meta.corteInventario);
-    if (c) { // el mes anterior al corte del inventario (el último mes completo)
-      const prev = c.m === 1 ? (c.y - 1) + '-12' : c.y + '-' + pad(c.m - 1);
-      if (list.includes(prev)) return prev;
-    }
-    return list[list.length - 1] || '';
+  const isGoodsOnly = r => !['accessories', 'supplies'].includes(category(r));
+  const monthsWithData = () => [...new Set(DATA.entries.map(r => monthKey(r.fecha)).filter(Boolean))].sort();
+  const defaultMonth = () => { const l = monthsWithData(); return l[l.length - 1] || CURRENT; };
+  const monthEntries = () => DATA.entries.filter(r => monthKey(r.fecha) === month);
+  const fmtIso = iso => { const c = isoParts(iso); return c ? pad(c.d) + '/' + pad(c.m) + '/' + c.y : ''; };
+
+  function tokenGet() { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; } }
+  function tokenSet(v) { try { v ? localStorage.setItem(TOKEN_KEY, v) : localStorage.removeItem(TOKEN_KEY); } catch (e) { /* sin almacenamiento */ } }
+
+  /* ---------- Render: meses y panel de datos ---------- */
+
+  function renderMonths() {
+    if (!month) month = defaultMonth();
+    const year = +month.slice(0, 4);
+    const years = [...new Set(monthsWithData().map(k => +k.slice(0, 4)).concat([TODAY.getFullYear(), year]))].sort();
+    $('year').innerHTML = years.map(y => '<option>' + y + '</option>').join('');
+    $('year').value = String(year);
+    const counts = {};
+    DATA.entries.forEach(r => { const k = monthKey(r.fecha); if (k) counts[k] = (counts[k] || 0) + (isGoodsOnly(r) ? r.cantidad : 0); });
+    $('monthStrip').innerHTML = MESES.map((m, i) => {
+      const key = year + '-' + pad(i + 1), has = key in counts;
+      return '<button class="mbtn' + (has ? ' has' : '') + (key > CURRENT ? ' future' : '') + '" data-month="' + key + '" aria-pressed="' + (key === month) +
+        '" title="' + cap(monthName(key)) + (has ? ': ' + counts[key] + ' equipos ingresados' : ': sin datos') + '"><span>' + cap(m.slice(0, 3)) +
+        '</span><small>' + (has ? counts[key] : '—') + '</small></button>';
+    }).join('');
   }
-  const monthEntries = () => month ? DATA.entries.filter(r => monthKey(r.fecha) === month) : DATA.entries;
 
-  /* ---------- Render ---------- */
-
-  function renderSource() {
-    const n = DATA.entries.length, s = DATA.stock.length;
-    $('srcState').innerHTML = (fromExcel
-      ? '<b>Datos cargados desde Excel</b> (' + esc(DATA.meta.fuente || 'archivo') + ')'
-      : '<b>Datos publicados</b>' + (DATA.meta.fuente ? ' (' + esc(DATA.meta.fuente) + ')' : '')) +
-      ' · ' + n + ' entradas · ' + s + ' filas de inventario.' +
-      (fromExcel ? ' <span class="note">Solo se ven en este navegador hasta que publiques el archivo datos.js.</span>' : '');
-    $('downloadData').hidden = !fromExcel;
-    $('resetData').hidden = !fromExcel;
+  function renderAdmin() {
+    const list = monthsWithData();
+    $('srcState').innerHTML = '<b>Meses con entradas:</b> ' + (list.length ? esc(list.map(k => cap(monthName(k))).join(', ')) : 'ninguno todavía') +
+      ' · <b>Inventario:</b> ' + (DATA.stock.length ? (DATA.meta.corteInventario ? 'corte ' + fmtIso(DATA.meta.corteInventario) : 'sin fecha de corte') : 'sin cargar');
+    const rows = monthEntries(), info = (DATA.meta.meses || {})[month];
+    $('upMonth').textContent = monthName(month);
+    $('upMonthState').textContent = rows.length
+      ? 'Guardado: ' + rows.length + ' filas, ' + sum(rows.filter(isGoodsOnly)) + ' equipos' + (info && info.fuente ? ' (' + info.fuente + (info.cargado ? ', ' + fmtIso(info.cargado) : '') + ')' : '') + '. Cargar otro archivo lo reemplaza.'
+      : 'Sin datos todavía.';
+    $('stockState').textContent = DATA.stock.length
+      ? DATA.stock.length + ' filas' + (DATA.meta.fuenteInventario ? ' · ' + DATA.meta.fuenteInventario : '') + '. Cargar otro archivo lo reemplaza.'
+      : 'Sin cargar todavía.';
     $('corte').value = DATA.meta.corteInventario || '';
-    const list = months();
-    if (!list.includes(month)) month = defaultMonth(list);
-    $('month').innerHTML = list.map(k => '<option value="' + k + '">' + cap(monthName(k)) + '</option>').join('');
-    $('month').value = month;
-    $('monthLabel').hidden = list.length < 2;
+
+    const token = tokenGet(), repo = ghRepo();
+    $('saveRow').hidden = !draft;
+    if (draft) $('dirtyText').innerHTML = '<b>Cambios sin guardar:</b> ' + esc(listJoin(draft.changes)) + '. Solo se ven en este navegador.';
+    $('saveBtn').textContent = token ? 'Guardar cambios' : 'Guardar (descargar datos.js)';
+    $('ghState').textContent = token ? '· conectado' : '· sin conectar';
+    $('ghForget').hidden = !token;
+    $('ghRepoName').textContent = repo.owner + '/' + repo.repo;
+    $('adminToggle').textContent = 'Actualizar datos' + (draft ? ' •' : '');
   }
+
+  /* ---------- Render: resumen y cambios ---------- */
 
   function renderSummary() {
     const rows = monthEntries();
-    const mName = month ? monthName(month) : '';
-    const days = rows.map(r => +r.fecha.slice(0, 2)).filter(Boolean);
+    const mName = monthName(month);
     const brand = $('stockBrand').value;
-    $('subtitle').textContent = 'Entradas ' + (mName ? 'de ' + mName.split(' ')[0] : 'del período') + ' y seguimiento de existencias' +
+    $('subtitle').textContent = 'Entradas de ' + mName.split(' ')[0] + ' y seguimiento de existencias' +
       (brand && brand !== 'all' ? ' de ' + (brand === 'IPHONE' ? 'iPhone' : titleCase(brand)) : '');
-    $('sumEyebrow').textContent = 'ENTRADAS REGISTRADAS' + (mName ? ' · ' + Math.min(...days) + '–' + Math.max(...days) + ' ' + mName.toUpperCase() : '');
-    document.title = 'TechnologySales — Informe de inventario' + (mName ? ' · ' + mName : '');
+    const days = rows.map(r => +r.fecha.slice(0, 2)).filter(Boolean);
+    $('sumEyebrow').textContent = 'ENTRADAS REGISTRADAS · ' + (days.length ? Math.min(...days) + '–' + Math.max(...days) + ' ' : '') + mName.toUpperCase();
+    document.title = 'TechnologySales — Informe de inventario · ' + mName;
+
+    const empty = !rows.length;
+    $('sumEmpty').hidden = !empty; $('sumBody').hidden = empty;
+    $('sumEmpty').innerHTML = 'No hay entradas cargadas para ' + esc(mName) + '.<br><span class="note">Para agregarlas: <b>Actualizar datos → Cargar Excel de entradas</b>.</span>';
+    if (empty) return;
 
     const metrics = [['purchases', 'Dispositivos comprados'], ['changes', 'Equipos en cambio'], ['others', 'Otros ingresos'], ['accessories', 'Accesorios comprados']];
     $('entryCards').innerHTML = metrics.map(([k, l]) =>
       '<button class="card" data-kind="' + k + '"><strong>' + sum(rows.filter(r => category(r) === k)) + '</strong><span>' + l + '</span></button>').join('');
-    const devices = sum(rows.filter(r => !['accessories', 'supplies'].includes(category(r)))), accUnits = sum(rows.filter(r => category(r) === 'accessories'));
+    const devices = sum(rows.filter(isGoodsOnly)), accUnits = sum(rows.filter(r => category(r) === 'accessories'));
     $('entryTotal').textContent = devices + ' ' + plural(devices, 'equipo ingresado', 'equipos ingresados');
     $('entryAcc').textContent = accUnits ? ' + ' + accUnits + ' ' + plural(accUnits, 'accesorio', 'accesorios') : '';
 
     const c = isoParts(DATA.meta.corteInventario);
-    $('sumText').textContent = 'Las entradas registradas describen los movimientos ' + (mName ? 'de ' + mName.split(' ')[0] : 'del período') + '. ' +
+    $('sumText').textContent = 'Las entradas registradas describen los movimientos de ' + mName.split(' ')[0] + '. ' +
       (c ? 'Las existencias disponibles se consultan en el corte de inventario del ' + c.d + ' de ' + MESES[c.m - 1] + ' de ' + c.y + '.'
          : 'Las existencias disponibles se consultan en la pestaña de existencias.');
 
@@ -331,7 +375,11 @@
   }
 
   function renderChanges() {
-    $('chgEyebrow').textContent = 'CAMBIOS REGISTRADOS' + (month ? ' · ' + monthName(month).toUpperCase() : '');
+    $('chgEyebrow').textContent = 'CAMBIOS REGISTRADOS · ' + monthName(month).toUpperCase();
+    const empty = !monthEntries().length;
+    $('chgEmpty').hidden = !empty; $('chgBody').hidden = empty;
+    $('chgEmpty').innerHTML = 'No hay entradas cargadas para ' + esc(monthName(month)) + '.';
+    if (empty) return;
     const list = changeBranches();
     const total = list.reduce((a, b) => a + b[1], 0);
     const max = Math.max(1, ...list.map(b => b[1]));
@@ -368,7 +416,7 @@
       '</td><td>' + esc(r.recibe) + '</td><td class="num">' + r.cantidad + '</td></tr>').join('') || '<tr><td colspan="5" class="empty">No hay cambios registrados.</td></tr>';
   }
 
-  /* ---------- Existencias ---------- */
+  /* ---------- Render: existencias ---------- */
 
   let shown = [];
   function fillSelect(id, values, allLabel, preferred) {
@@ -429,19 +477,24 @@
       '</span></td></tr>').join('') || '<tr><td colspan="3" class="empty">No hay resultados con estos filtros.</td></tr>';
   }
 
+  function renderMonthViews() { renderMonths(); renderAdmin(); renderSummary(); renderChanges(); }
   function renderAll() {
     categoryOf = {};
     DATA.stock.forEach(r => { if (r.categoria) categoryOf[r.equipo] = r.categoria; });
-    renderSource(); renderStockFrame(); renderSummary(); renderChanges();
+    renderStockFrame(); renderMonthViews();
   }
 
   /* ---------- Carga de Excel ---------- */
+
+  const noQty = s => s.kind === 'entries' && s.maps.entries.cantidad == null;
+  const NO_QTY_WARNING = '<p class="warn"><b>El archivo de entradas no trae la columna Cantidad.</b> Cada fila se cuenta como 1 unidad, así que las compras ' +
+    'de varias unidades en una sola línea quedan cortas. Exporta el reporte sin borrar la columna Cantidad y vuelve a cargarlo.</p>';
 
   function renderReview() {
     const box = $('review');
     if (!sheets.length) { box.hidden = true; box.innerHTML = ''; return; }
     box.hidden = false;
-    box.innerHTML = '<h3>Archivos leídos</h3><p class="note">Revisa que cada hoja tenga el uso y las columnas correctas. Los cambios se aplican al instante.</p>' +
+    box.innerHTML = '<h3>Archivo leído</h3><p class="note">Revisa que cada hoja tenga el uso y las columnas correctas. Los cambios se aplican al instante.</p>' +
       sheets.map((s, i) => {
         const issues = sheetIssues(s);
         const count = s.kind === 'ignore' || issues.length ? 0 : parseSheet(s).length;
@@ -460,41 +513,65 @@
       }).join('');
   }
 
-  const noQty = s => s.kind === 'entries' && s.maps.entries.cantidad == null;
-  const NO_QTY_WARNING = '<p class="warn"><b>El archivo de entradas no trae la columna Cantidad.</b> Cada fila se cuenta como 1 unidad, así que las compras ' +
-    'de varias unidades en una sola línea quedan cortas. Exporta el reporte sin borrar la columna Cantidad y vuelve a cargarlo.</p>';
-
   function applySheets() {
     const usable = sheets.filter(s => s.kind !== 'ignore' && !sheetIssues(s).length);
     const entrySheets = usable.filter(s => s.kind === 'entries'), stockSheets = usable.filter(s => s.kind === 'stock');
     if (!usable.length) {
-      $('loadMsg').innerHTML = '<span class="tag red">No se encontró un reporte de entradas ni de inventario.</span> Indica abajo qué columna corresponde a cada dato.';
+      $('loadMsg').innerHTML = '<span class="tag red">No se reconoció el archivo.</span> Indica abajo qué columna corresponde a cada dato.';
       return;
     }
-    const corte = stockSheets.map(s => dateFromFileName(s.fileName)).find(Boolean) || $('corte').value || baseForUpload.meta.corteInventario || '';
-    const stock = stockSheets.length ? [].concat(...stockSheets.map(parseSheet)) : baseForUpload.stock;
-    const entries = entrySheets.length ? [].concat(...entrySheets.map(parseSheet)) : baseForUpload.entries;
-    const cats = {};
-    stock.forEach(r => { if (r.categoria) cats[r.equipo] = r.categoria; });
-    entries.forEach(r => { r.categoria = r.categoria || cats[r.equipo] || ''; });
-    const data = {
-      meta: { fuente: [...new Set(usable.map(s => s.fileName))].join(', '), corteInventario: corte },
-      entries, stock
-    };
-    const msg = [
-      entrySheets.length ? entries.length + ' entradas leídas' : 'no se cargaron entradas (se mantienen las anteriores)',
-      stockSheets.length ? stock.length + ' filas de inventario leídas' : 'no se cargó inventario (se mantiene el anterior)'
-    ];
-    $('loadMsg').innerHTML = '<span class="tag ok">Informe actualizado</span> ' + esc(msg.join(' · ')) + '.' +
-      (stockSheets.length ? ' <b>Revisa la fecha de corte del inventario y el mes del informe.</b>' : '') +
-      (entrySheets.some(noQty) ? NO_QTY_WARNING : '');
-    setData(data, true);
+    const base = baseForUpload;
+    const data = { meta: Object.assign({}, base.meta), entries: base.entries, stock: base.stock };
+    delete data.meta.fuente; delete data.meta.mes; // campos de versiones anteriores
+    const done = [], changes = [];
+    let problem = '', warn = '';
+
+    if (stockSheets.length) {
+      data.stock = [].concat(...stockSheets.map(parseSheet));
+      data.meta.corteInventario = stockSheets.map(s => dateFromFileName(s.fileName)).find(Boolean) || $('corte').value || base.meta.corteInventario || '';
+      data.meta.fuenteInventario = [...new Set(stockSheets.map(s => s.fileName))].join(', ');
+      done.push('inventario: ' + data.stock.length + ' filas' + (data.meta.corteInventario ? ', corte ' + fmtIso(data.meta.corteInventario) : ''));
+      changes.push('inventario');
+    }
+
+    if (entrySheets.length) {
+      const all = [].concat(...entrySheets.map(parseSheet));
+      const inMonth = all.filter(r => monthKey(r.fecha) === uploadMonth);
+      const rest = new Map();
+      all.filter(r => monthKey(r.fecha) !== uploadMonth).forEach(r => { const k = monthKey(r.fecha) || 'sin fecha'; rest.set(k, (rest.get(k) || 0) + 1); });
+      const restText = [...rest].map(([k, n]) => n + ' de ' + (k === 'sin fecha' ? 'filas sin fecha' : monthName(k))).join(', ');
+      if (!inMonth.length) {
+        problem = '<span class="tag red">El archivo no tiene entradas de ' + esc(monthName(uploadMonth)) + '.</span> ' +
+          (rest.size ? 'Trae filas de: ' + esc(restText) + '. Elige ese mes arriba y vuelve a cargarlo.' : '');
+      } else {
+        const replaced = base.entries.filter(r => monthKey(r.fecha) === uploadMonth).length;
+        const cats = {};
+        data.stock.forEach(r => { if (r.categoria) cats[r.equipo] = r.categoria; });
+        inMonth.forEach(r => { r.categoria = cats[r.equipo] || ''; });
+        data.entries = base.entries.filter(r => monthKey(r.fecha) !== uploadMonth).concat(inMonth);
+        data.meta.meses = Object.assign({}, base.meta.meses, { [uploadMonth]: { fuente: [...new Set(entrySheets.map(s => s.fileName))].join(', '), cargado: todayIso } });
+        done.push('entradas de ' + monthName(uploadMonth) + ': ' + inMonth.length + ' filas' + (replaced ? ' (reemplazan ' + replaced + ' anteriores)' : '') +
+          (rest.size ? '; se ignoraron ' + esc(restText) : ''));
+        changes.push('entradas de ' + monthName(uploadMonth));
+        if (entrySheets.some(noQty)) warn = NO_QTY_WARNING;
+      }
+    }
+
+    if (stockSheets.length) { // al cambiar el inventario, completa categorías que falten
+      const cats = {};
+      data.stock.forEach(r => { if (r.categoria) cats[r.equipo] = r.categoria; });
+      data.entries = data.entries.map(r => r.categoria || !cats[r.equipo] ? r : Object.assign({}, r, { categoria: cats[r.equipo] }));
+    }
+
+    $('loadMsg').innerHTML = (done.length ? '<span class="tag ok">Cargado</span> ' + esc(done.join(' · ')) + '. Revisa el informe y pulsa <b>Guardar cambios</b>.' : '') +
+      (problem ? (done.length ? '<br>' : '') + problem : '') + warn;
+    if (changes.length) setDraft(data, changes);
   }
 
-  async function loadFiles(files) {
+  async function loadFiles(files, forced) {
     if (!window.XLSX) { $('loadMsg').innerHTML = '<span class="tag red">No se pudo cargar el lector de Excel.</span>'; return; }
     $('loadMsg').textContent = 'Leyendo archivo…';
-    baseForUpload = DATA;
+    baseForUpload = DATA; uploadKind = forced; uploadMonth = month;
     const fresh = [];
     for (const file of files) {
       try {
@@ -508,6 +585,10 @@
         return;
       }
     }
+    if (forced) { // botón de entradas o de inventario: usa ese tipo en las hojas que lo cumplan
+      const fits = fresh.filter(s => complete(forced, s.maps[forced]));
+      fresh.forEach(s => { s.kind = fits.length ? (fits.includes(s) ? forced : 'ignore') : forced; });
+    }
     sheets = fresh;
     renderReview();
     applySheets();
@@ -519,6 +600,89 @@
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
+  /* ---------- Guardar ---------- */
+
+  function serialize(data) {
+    return '// Datos que muestra la página al abrirse. Se actualizan con "Guardar cambios".\nwindow.DATOS_INFORME = ' + JSON.stringify(data) + ';\n';
+  }
+
+  function ghRepo() {
+    const h = location.hostname;
+    if (h.endsWith('.github.io')) return { owner: h.split('.')[0], repo: location.pathname.split('/')[1] || h };
+    return GITHUB_REPO;
+  }
+  function ghError(status, repo) {
+    if (status === 401) return 'El token no es válido o ya expiró. Crea uno nuevo y vuelve a conectarlo.';
+    if (status === 403) return 'El token no tiene permiso para escribir en ' + repo + ' (Contents: Read and write).';
+    if (status === 404) return 'No se encontró ' + repo + ' o el token no tiene acceso a ese repositorio.';
+    if (status === 409 || status === 422) return 'datos.js cambió en GitHub mientras tanto. Recarga la página y vuelve a intentarlo.';
+    return 'GitHub respondió con un error (' + status + '). Inténtalo de nuevo en un momento.';
+  }
+  function b64(str) {
+    const bytes = new TextEncoder().encode(str);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(bin);
+  }
+  async function ghRequest(path, token, opts) {
+    const r = ghRepo();
+    return fetch('https://api.github.com/repos/' + r.owner + '/' + r.repo + path, Object.assign({ cache: 'no-store' }, opts, {
+      headers: Object.assign({ Authorization: 'Bearer ' + token, 'X-GitHub-Api-Version': '2022-11-28', Accept: 'application/vnd.github+json' }, (opts || {}).headers)
+    }));
+  }
+  async function ghPut(content, message) {
+    const token = tokenGet(), r = ghRepo(), name = r.owner + '/' + r.repo;
+    const cur = await ghRequest('/contents/datos.js', token, { headers: { Accept: 'application/vnd.github.object' } });
+    if (!cur.ok && cur.status !== 404) throw new Error(ghError(cur.status, name));
+    const sha = cur.ok ? (await cur.json()).sha : undefined;
+    const res = await ghRequest('/contents/datos.js', token, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, content: b64(content), sha })
+    });
+    if (!res.ok) throw new Error(ghError(res.status, name));
+  }
+
+  async function save() {
+    if (!draft) return;
+    const content = serialize(DATA);
+    if (!tokenGet()) {
+      download('datos.js', content, 'text/javascript;charset=utf-8');
+      $('saveMsg').innerHTML = '<p class="warn">Se descargó <b>datos.js</b>. Súbelo al repositorio en GitHub (<i>Add file → Upload files</i>) reemplazando el anterior. ' +
+        'Cuando la página publicada lo muestre, estos cambios dejarán de aparecer como pendientes. Para guardar con un clic, configura la conexión con GitHub.</p>';
+      return;
+    }
+    $('saveBtn').disabled = true;
+    $('saveMsg').innerHTML = '<p class="note">Guardando en GitHub…</p>';
+    try {
+      await ghPut(content, 'Actualizar datos del informe: ' + draft.changes.join(', '));
+      PUBLISHED = DATA;
+      draft = null; storageSet(null);
+      $('saveMsg').innerHTML = '<p><span class="tag ok">Guardado</span> La página pública se actualiza en 1–2 minutos.</p>';
+      sheets = []; renderReview(); $('loadMsg').textContent = '';
+      renderAll();
+    } catch (e) {
+      $('saveMsg').innerHTML = '<p class="warn"><b>No se pudo guardar.</b> ' + esc(e.message || 'Error de conexión.') + ' Tus cambios siguen en este navegador.</p>';
+    } finally { $('saveBtn').disabled = false; }
+  }
+
+  async function connectToken() {
+    const token = $('ghToken').value.trim();
+    if (!token) return;
+    const r = ghRepo(), name = r.owner + '/' + r.repo;
+    $('saveMsg').innerHTML = '<p class="note">Comprobando el token…</p>';
+    try {
+      const res = await ghRequest('', token);
+      if (!res.ok) throw new Error(ghError(res.status, name));
+      const info = await res.json();
+      if (info.permissions && !info.permissions.push) throw new Error(ghError(403, name));
+      tokenSet(token); $('ghToken').value = '';
+      $('saveMsg').innerHTML = '<p><span class="tag ok">Conectado</span> Ya puedes guardar directamente en ' + esc(name) + '.</p>';
+    } catch (e) {
+      $('saveMsg').innerHTML = '<p class="warn"><b>No se pudo conectar.</b> ' + esc(e.message || 'Error de conexión.') + '</p>';
+    }
+    renderAdmin();
+  }
+
   /* ---------- Eventos ---------- */
 
   document.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => {
@@ -526,6 +690,16 @@
     document.querySelectorAll('[data-tab]').forEach(x => x.setAttribute('aria-selected', x === b));
   });
   document.querySelectorAll('.print').forEach(b => b.onclick = () => window.print());
+
+  $('monthStrip').addEventListener('click', e => {
+    const b = e.target.closest('[data-month]'); if (!b) return;
+    month = b.dataset.month; renderMonthViews();
+  });
+  $('year').addEventListener('change', () => { month = $('year').value + '-' + month.slice(5); renderMonthViews(); });
+  $('adminToggle').addEventListener('click', () => {
+    const open = $('dataPanel').hidden;
+    $('dataPanel').hidden = !open; $('adminToggle').setAttribute('aria-expanded', open);
+  });
 
   $('entryCards').addEventListener('click', e => {
     const b = e.target.closest('[data-kind]'); if (!b) return;
@@ -548,8 +722,6 @@
     $(id).dataset.touched = '1'; renderStockFrame(); renderSummary();
   }));
 
-  $('month').addEventListener('change', () => { month = $('month').value; renderSummary(); renderChanges(); });
-
   $('export').onclick = () => {
     const cell = v => '"' + String(v).replace(/"/g, '""') + '"';
     const csv = '﻿' + [['Equipo', 'Existencias'], ...shown.map(r => [r.name, r.quantity])].map(r => r.map(cell).join(';')).join('\r\n');
@@ -557,11 +729,12 @@
     download('existencias' + c + '.csv', csv, 'text/csv;charset=utf-8');
   };
 
-  $('fileInput').addEventListener('change', e => { if (e.target.files.length) loadFiles([...e.target.files]); e.target.value = ''; });
+  $('entriesInput').addEventListener('change', e => { if (e.target.files.length) loadFiles([...e.target.files], 'entries'); e.target.value = ''; });
+  $('stockInput').addEventListener('change', e => { if (e.target.files.length) loadFiles([...e.target.files], 'stock'); e.target.value = ''; });
   const drop = $('dataPanel');
   ['dragenter', 'dragover'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add('dragging'); }));
   ['dragleave', 'drop'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove('dragging'); }));
-  drop.addEventListener('drop', e => { if (e.dataTransfer.files.length) loadFiles([...e.dataTransfer.files]); });
+  drop.addEventListener('drop', e => { if (e.dataTransfer.files.length) loadFiles([...e.dataTransfer.files], null); });
 
   $('review').addEventListener('change', e => {
     const el = e.target, s = sheets[+el.dataset.i]; if (!s) return;
@@ -571,17 +744,19 @@
   });
 
   $('corte').addEventListener('change', () => {
-    const keep = month;
-    setData(Object.assign({}, DATA, { meta: Object.assign({}, DATA.meta, { corteInventario: $('corte').value }) }), true);
-    if (months().includes(keep)) { month = keep; renderSource(); renderSummary(); renderChanges(); }
+    const meta = Object.assign({}, DATA.meta, { corteInventario: $('corte').value });
+    setDraft(Object.assign({}, DATA, { meta }), ['fecha de corte del inventario']);
   });
 
-  $('downloadData').onclick = () => {
-    const out = Object.assign({}, DATA, { meta: Object.assign({}, DATA.meta, { mes: month }) });
-    download('datos.js', '// Datos que muestra la página al abrirse.\n// Se generan con el botón "Descargar datos.js" después de cargar los Excel.\nwindow.DATOS_INFORME = ' +
-      JSON.stringify(out) + ';\n', 'text/javascript;charset=utf-8');
-  };
-  $('resetData').onclick = () => { sheets = []; renderReview(); $('loadMsg').textContent = ''; setData(PUBLISHED, false); };
+  $('saveBtn').addEventListener('click', save);
+  $('discardBtn').addEventListener('click', () => {
+    if (!confirm('¿Descartar los cambios sin guardar? Se volverá a los datos publicados.')) return;
+    sheets = []; renderReview(); $('loadMsg').textContent = ''; $('saveMsg').textContent = '';
+    clearDraft();
+  });
+  $('ghSaveToken').addEventListener('click', connectToken);
+  $('ghForget').addEventListener('click', () => { tokenSet(''); $('saveMsg').textContent = ''; renderAdmin(); });
 
+  if (draft) { $('dataPanel').hidden = false; $('adminToggle').setAttribute('aria-expanded', 'true'); }
   renderAll();
 })();
