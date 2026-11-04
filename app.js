@@ -447,7 +447,8 @@
         const count = s.kind === 'ignore' || issues.length ? 0 : parseSheet(s).length;
         const status = s.kind === 'ignore' ? '<span class="tag">No se usa</span>'
           : issues.length ? '<span class="tag red">Falta: ' + esc(issues.join(', ')) + '</span>'
-          : '<span class="tag ok">' + KINDS[s.kind].label + ' · ' + count + ' filas leídas</span>';
+          : '<span class="tag ok">' + KINDS[s.kind].label + ' · ' + count + ' filas leídas</span>' +
+            (noQty(s) ? ' <span class="tag amber">Sin columna Cantidad: cada fila cuenta como 1 unidad</span>' : '');
         const fields = s.kind === 'ignore' ? [] : kindFields(s.kind);
         return '<details class="sheet"' + (issues.length || s.kind === 'ignore' ? ' open' : '') + '><summary><b>' + esc(s.fileName) + (s.sheetName ? ' · ' + esc(s.sheetName) : '') +
           '</b> ' + status + '</summary><div class="filters"><label>Usar como<select data-i="' + i + '" data-k="kind">' +
@@ -458,6 +459,10 @@
           '</div></details>';
       }).join('');
   }
+
+  const noQty = s => s.kind === 'entries' && s.maps.entries.cantidad == null;
+  const NO_QTY_WARNING = '<p class="warn"><b>El archivo de entradas no trae la columna Cantidad.</b> Cada fila se cuenta como 1 unidad, así que las compras ' +
+    'de varias unidades en una sola línea quedan cortas. Exporta el reporte sin borrar la columna Cantidad y vuelve a cargarlo.</p>';
 
   function applySheets() {
     const usable = sheets.filter(s => s.kind !== 'ignore' && !sheetIssues(s).length);
@@ -481,7 +486,8 @@
       stockSheets.length ? stock.length + ' filas de inventario leídas' : 'no se cargó inventario (se mantiene el anterior)'
     ];
     $('loadMsg').innerHTML = '<span class="tag ok">Informe actualizado</span> ' + esc(msg.join(' · ')) + '.' +
-      (stockSheets.length ? ' <b>Revisa la fecha de corte del inventario y el mes del informe.</b>' : '');
+      (stockSheets.length ? ' <b>Revisa la fecha de corte del inventario y el mes del informe.</b>' : '') +
+      (entrySheets.some(noQty) ? NO_QTY_WARNING : '');
     setData(data, true);
   }
 
